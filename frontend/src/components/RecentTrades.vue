@@ -3,6 +3,7 @@ import type { Trade } from '../types'
 
 defineProps<{
   trades: Trade[]
+  symbol?: string
 }>()
 
 function formatTime(timestamp: number): string {
@@ -29,10 +30,10 @@ function formatQuantity(qty: string): string {
 
 <template>
   <div class="trades">
-    <h2>Recent Trades</h2>
+    <h2>Recent Trades <span v-if="symbol" class="symbol-tag">{{ symbol }}</span></h2>
     
     <div v-if="trades.length === 0" class="empty">
-      No trades yet...
+      Waiting for trades...
     </div>
     
     <div v-else class="trade-list">
@@ -67,6 +68,17 @@ h2 {
   color: #888;
   text-transform: uppercase;
   letter-spacing: 1px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.symbol-tag {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: #333;
+  border-radius: 3px;
+  color: #aaa;
 }
 
 .empty {

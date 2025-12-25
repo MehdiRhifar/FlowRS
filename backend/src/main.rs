@@ -5,14 +5,14 @@ mod server;
 mod types;
 
 use crate::metrics::create_shared_metrics;
-use crate::orderbook::create_shared_orderbook;
-use crate::types::ClientMessage;
+use crate::orderbook::create_shared_orderbook_manager;
+use crate::types::{ClientMessage, TRADING_PAIRS};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tracing_subscriber::EnvFilter;
 
 const SERVER_ADDR: &str = "0.0.0.0:8080";
-const BROADCAST_CAPACITY: usize = 1024;
+const BROADCAST_CAPACITY: usize = 4096; // Increased for multiple symbols
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -24,23 +24,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     tracing::info!("Starting Order Book Visualizer Backend");
+    tracing::info!("Tracking {} trading pairs: {:?}", TRADING_PAIRS.len(), TRADING_PAIRS);
 
     // Create shared state
-    let orderbook = create_shared_orderbook();
+    let orderbook_manager = create_shared_orderbook_manager();
     let metrics = create_shared_metrics();
 
     // Create broadcast channel for client updates
     let (tx, _rx) = broadcast::channel::<ClientMessage>(BROADCAST_CAPACITY);
 
     // Clone for different tasks
-    let orderbook_binance = orderbook.clone();
+    let orderbook_binance = orderbook_manager.clone();
     let metrics_binance = metrics.clone();
     let tx_binance = tx.clone();
 
-    let orderbook_server = orderbook.clone();
+    let orderbook_server = orderbook_manager.clone();
     let metrics_server = metrics.clone();
     let tx_server = tx.clone();
 
+    let orderbook_metrics = orderbook_manager.clone();
     let metrics_ticker = metrics.clone();
     let tx_metrics = tx.clone();
 
@@ -49,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         loop {
             interval.tick().await;
-            let current_metrics = metrics_ticker.compute_metrics().await;
+            let current_metrics = metrics_ticker.compute_metrics(Some(&orderbook_metrics)).await;
             let msg = ClientMessage::Metrics(current_metrics);
             let _ = tx_metrics.send(msg);
         }

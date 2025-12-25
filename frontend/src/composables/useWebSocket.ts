@@ -1,19 +1,30 @@
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, computed } from 'vue'
 import type { BookUpdate, Trade, Metrics, ServerMessage } from '../types'
 
 const WS_URL = 'ws://localhost:8080/ws'
-const MAX_TRADES = 20
+const MAX_TRADES = 50
 const RECONNECT_DELAY = 3000
 
 export function useWebSocket() {
-  const book = ref<BookUpdate | null>(null)
-  const trades = ref<Trade[]>([])
+  // Store books per symbol
+  const books = ref<Record<string, BookUpdate>>({})
+  // Store trades per symbol (and all trades combined)
+  const allTrades = ref<Trade[]>([])
+  const tradesBySymbol = ref<Record<string, Trade[]>>({})
   const metrics = ref<Metrics | null>(null)
   const connected = ref(false)
   const error = ref<string | null>(null)
+  const symbols = ref<string[]>([])
+  const selectedSymbol = ref<string>('BTCUSDT')
 
   let ws: WebSocket | null = null
   let reconnectTimeout: number | null = null
+
+  // Computed: current book for selected symbol
+  const book = computed(() => books.value[selectedSymbol.value] || null)
+  
+  // Computed: trades for selected symbol
+  const trades = computed(() => tradesBySymbol.value[selectedSymbol.value] || [])
 
   function connect() {
     if (ws?.readyState === WebSocket.OPEN) return
@@ -50,12 +61,32 @@ export function useWebSocket() {
 
   function handleMessage(message: ServerMessage) {
     switch (message.type) {
+      case 'symbol_list':
+        symbols.value = message.data
+        // Initialize trade arrays for each symbol
+        for (const symbol of message.data) {
+          if (!tradesBySymbol.value[symbol]) {
+            tradesBySymbol.value[symbol] = []
+          }
+        }
+        break
+        
       case 'book_update':
-        book.value = message.data
+        books.value[message.data.symbol] = message.data
         break
+        
       case 'trade':
-        trades.value = [message.data, ...trades.value].slice(0, MAX_TRADES)
+        // Add to all trades
+        allTrades.value = [message.data, ...allTrades.value].slice(0, MAX_TRADES * 2)
+        
+        // Add to symbol-specific trades
+        const symbol = message.data.symbol
+        if (!tradesBySymbol.value[symbol]) {
+          tradesBySymbol.value[symbol] = []
+        }
+        tradesBySymbol.value[symbol] = [message.data, ...tradesBySymbol.value[symbol]].slice(0, MAX_TRADES)
         break
+        
       case 'metrics':
         metrics.value = message.data
         break
@@ -86,6 +117,10 @@ export function useWebSocket() {
     connect()
   }
 
+  function selectSymbol(symbol: string) {
+    selectedSymbol.value = symbol
+  }
+
   function handleVisibilityChange() {
     if (document.visibilityState === 'visible') {
       console.log('Tab became visible, reconnecting WebSocket for fresh state...')
@@ -104,8 +139,17 @@ export function useWebSocket() {
   })
 
   return {
+    // Single symbol (for backwards compatibility)
     book,
     trades,
+    // Multi-symbol
+    books,
+    allTrades,
+    tradesBySymbol,
+    symbols,
+    selectedSymbol,
+    selectSymbol,
+    // Global
     metrics,
     connected,
     error,

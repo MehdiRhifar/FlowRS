@@ -4,7 +4,14 @@ import type { BookUpdate } from '../types'
 
 const props = defineProps<{
   book: BookUpdate | null
+  symbol?: string
 }>()
+
+// Extract base asset from symbol (e.g., "BTCUSDT" -> "BTC")
+const baseAsset = computed(() => {
+  if (!props.symbol) return 'Asset'
+  return props.symbol.replace('USDT', '')
+})
 
 // Calculate max quantity for volume bar scaling
 const maxQuantity = computed(() => {
@@ -19,7 +26,7 @@ const maxQuantity = computed(() => {
 function formatPrice(price: string): string {
   return parseFloat(price).toLocaleString('en-US', {
     minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+    maximumFractionDigits: 20,
   })
 }
 
@@ -35,13 +42,25 @@ function getBarWidth(quantity: string): string {
 
 <template>
   <div class="orderbook">
-    <h2>Order Book</h2>
+    <div class="header">
+      <h2>Order Book</h2>
+      <div v-if="book" class="depth-info">
+        <span class="bid-depth">Bid: {{ parseFloat(book.bid_depth).toFixed(2) }}</span>
+        <span class="ask-depth">Ask: {{ parseFloat(book.ask_depth).toFixed(2) }}</span>
+      </div>
+    </div>
     
     <div v-if="!book" class="loading">
-      Waiting for data...
+      Waiting for {{ symbol || 'data' }}...
     </div>
     
     <template v-else>
+      <!-- Column Headers -->
+      <div class="column-headers">
+        <span class="header-price">Price (USDT)</span>
+        <span class="header-quantity">Quantity ({{ baseAsset }})</span>
+      </div>
+
       <!-- Asks (reversed to show lowest at bottom) -->
       <div class="levels asks">
         <div
@@ -86,18 +105,62 @@ function getBarWidth(quantity: string): string {
   flex-direction: column;
 }
 
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
 h2 {
-  margin: 0 0 16px 0;
+  margin: 0;
   font-size: 14px;
   color: #888;
   text-transform: uppercase;
   letter-spacing: 1px;
 }
 
+.depth-info {
+  display: flex;
+  gap: 12px;
+  font-size: 11px;
+  font-family: 'Monaco', 'Menlo', monospace;
+}
+
+.bid-depth {
+  color: #22c55e;
+}
+
+.ask-depth {
+  color: #ef4444;
+}
+
 .loading {
   color: #666;
   text-align: center;
   padding: 40px;
+}
+
+.column-headers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  padding: 8px 8px 12px 8px;
+  border-bottom: 1px solid #333;
+  margin-bottom: 8px;
+}
+
+.header-price,
+.header-quantity {
+  font-size: 11px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.header-quantity {
+  text-align: right;
 }
 
 .levels {
