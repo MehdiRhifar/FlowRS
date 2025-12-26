@@ -4,15 +4,24 @@ import OrderBook from './components/OrderBook.vue'
 import RecentTrades from './components/RecentTrades.vue'
 import MetricsPanel from './components/MetricsPanel.vue'
 
-const { 
-  book, 
-  trades, 
-  metrics, 
-  connected, 
-  symbols, 
-  selectedSymbol, 
-  selectSymbol 
+const {
+  symbolBooks,
+  trades,
+  metrics,
+  connected,
+  symbols,
+  selectedSymbol,
+  selectSymbol,
+  enabledExchanges,
+  toggleExchange
 } = useWebSocket()
+
+// Exchange colors
+const exchangeColors: Record<string, string> = {
+  'Binance': '#f0b90b',
+  'Bybit': '#f7a600',
+  'OKX': '#00c087',
+}
 </script>
 
 <template>
@@ -34,7 +43,21 @@ const {
           {{ symbol.replace('USDT', '') }}
         </button>
       </div>
-      
+
+      <div class="exchange-filters">
+        <span class="filter-label">Exchanges:</span>
+        <button
+          v-for="exchange in ['Binance', 'Bybit']"
+          :key="exchange"
+          class="exchange-toggle-btn"
+          :class="{ active: enabledExchanges.has(exchange) }"
+          :style="{ '--exchange-color': enabledExchanges.has(exchange) ? exchangeColors[exchange] : '#444' }"
+          @click="toggleExchange(exchange)"
+        >
+          {{ exchange }}
+        </button>
+      </div>
+
       <div class="header-right">
         <span class="pair">{{ selectedSymbol }}</span>
       </div>
@@ -42,7 +65,7 @@ const {
 
     <main>
       <div class="orderbook-section">
-        <OrderBook :book="book" :symbol="selectedSymbol" />
+        <OrderBook :books="symbolBooks" :symbol="selectedSymbol" />
       </div>
 
       <div class="sidebar">
@@ -140,6 +163,40 @@ h1 {
   background: #3b82f6;
   border-color: #3b82f6;
   color: #fff;
+}
+
+.exchange-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-label {
+  font-size: 11px;
+  color: #666;
+  font-weight: 500;
+}
+
+.exchange-toggle-btn {
+  padding: 6px 12px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  background: transparent;
+  color: #888;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.exchange-toggle-btn:hover {
+  border-color: #555;
+}
+
+.exchange-toggle-btn.active {
+  background: var(--exchange-color);
+  border-color: var(--exchange-color);
+  color: #000;
 }
 
 .header-right {

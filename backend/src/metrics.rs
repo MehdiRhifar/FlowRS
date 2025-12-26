@@ -9,7 +9,7 @@ use sysinfo::System;
 use tokio::sync::RwLock;
 
 /// Number of latency samples to keep for percentile calculations
-const LATENCY_SAMPLE_SIZE: usize = 1024; // Power of 2 for fast modulo
+const LATENCY_SAMPLE_SIZE: usize = 4096; // Power of 2 for fast modulo
 
 /// Lock-free ring buffer for latency samples
 /// Uses atomic operations for writing, only needs lock for reading percentiles
@@ -227,7 +227,7 @@ impl MetricsCollector {
     }
 
     /// Record a message received from Binance (global + per-symbol)
-    pub fn record_message_for_symbol(&self, symbol: &str) {
+    pub fn record_nb_message(&self, symbol: &str) {
         self.global_message_count.fetch_add(1, Ordering::Relaxed);
         if let Some(collector) = self.symbol_collectors.get(symbol) {
             collector.record_message();
@@ -235,7 +235,7 @@ impl MetricsCollector {
     }
 
     /// Record an order book update (global only)
-    pub fn record_update(&self) {
+    pub fn record_nb_update(&self) {
         self.global_update_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -267,19 +267,13 @@ impl MetricsCollector {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Record processing latency in microseconds - NOW LOCK-FREE O(1)
+    /// Record latency from Instant for a specific symbol (micro_sec)
     #[inline]
-    pub fn record_latency_us(&self, latency_us: u64) {
+    pub fn record_latency(&self, symbol: &str, start: Instant) {
+        let latency_us = start.elapsed().as_micros() as u64;
         self.global_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
         self.global_latency_count.fetch_add(1, Ordering::Relaxed);
         self.global_latency_buffer.record(latency_us);
-    }
-
-    /// Record latency from Instant for a specific symbol - NOW LOCK-FREE
-    #[inline]
-    pub fn record_latency_with_symbol(&self, symbol: &str, start: Instant) {
-        let latency_us = start.elapsed().as_micros() as u64;
-        self.record_latency_us(latency_us);
         if let Some(collector) = self.symbol_collectors.get(symbol) {
             collector.record_latency_us(latency_us);
         }
@@ -359,12 +353,13 @@ impl MetricsCollector {
 
         let mut symbols = HashMap::new();
         if let Some(manager) = orderbook_manager {
-            let manager_guard = manager.read().await;
             for (symbol, collector) in &self.symbol_collectors {
                 let symbol_metrics = collector.compute_metrics(elapsed_secs);
-                
+
                 // Calculate spread_bps from order book
-                let spread_bps = if let Some(book) = manager_guard.get(symbol) {
+                // TODO: Update to handle multi-exchange (aggregate or pick one exchange)
+                let spread_bps = if let Some(book_ref) = manager.get("Binance", symbol) {
+                    let book = book_ref.value();
                     if let (Some(bid), Some(ask)) = (book.best_bid(), book.best_ask()) {
                         if bid > Decimal::ZERO {
                             let spread = ask - bid;

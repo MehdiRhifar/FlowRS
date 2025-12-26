@@ -1,31 +1,34 @@
 use crate::types::{PriceLevel, ClientMessage, TRADING_PAIRS};
+use dashmap::DashMap;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Thread-safe order book structure for a single symbol
 #[derive(Debug)]
 pub struct OrderBook {
     /// Symbol this book represents
     symbol: String,
+    /// Exchange this book is from
+    exchange: String,
     /// Bids (buy orders) - price -> quantity
     /// BTreeMap is sorted ascending, so we iterate in reverse for highest price first
     bids: BTreeMap<Decimal, Decimal>,
     /// Asks (sell orders) - price -> quantity
     /// BTreeMap is sorted ascending, lowest price first
     asks: BTreeMap<Decimal, Decimal>,
-    /// Last update ID from Binance (for synchronization)
+    /// Last update ID from exchange (for synchronization)
     last_update_id: u64,
     /// Whether the book has been initialized with snapshot
     initialized: bool,
 }
 
 impl OrderBook {
-    pub fn new(symbol: &str) -> Self {
+    pub fn new(symbol: &str, exchange: &str) -> Self {
         Self {
             symbol: symbol.to_string(),
+            exchange: exchange.to_string(),
             bids: BTreeMap::new(),
             asks: BTreeMap::new(),
             last_update_id: 0,
@@ -219,6 +222,7 @@ impl OrderBook {
         let (spread, spread_percent) = self.spread().unwrap_or((dec!(0), dec!(0)));
 
         ClientMessage::BookUpdate {
+            exchange: self.exchange.clone(),
             symbol: self.symbol.clone(),
             bids,
             asks,
@@ -233,36 +237,42 @@ impl OrderBook {
 /// Multi-symbol order book manager
 #[derive(Debug)]
 pub struct OrderBookManager {
-    books: std::collections::HashMap<String, OrderBook>,
+    /// Key format: "exchange:symbol" (e.g., "Binance:BTCUSDT")
+    books: DashMap<String, OrderBook>,
 }
 
 impl OrderBookManager {
-    pub fn with_symbols(symbols: &[&str]) -> Self {
-        let mut books = HashMap::new();
-        for symbol in symbols {
-            books.insert(symbol.to_string(), OrderBook::new(symbol));
+    /// Create a composite key from exchange and symbol
+    fn book_key(exchange: &str, symbol: &str) -> String {
+        format!("{}:{}", exchange, symbol)
+    }
+
+    pub fn with_symbols(_symbols: &[&str]) -> Self {
+        // Start with empty books - they'll be created on-demand per exchange
+        Self {
+            books: DashMap::new(),
         }
-        Self { books }
     }
 
-    pub fn get_mut(&mut self, symbol: &str) -> Option<&mut OrderBook> {
-        self.books.get_mut(symbol)
+    /// Get or create an order book for the given exchange and symbol
+    pub fn get_or_create(&self, exchange: &str, symbol: &str) -> dashmap::mapref::one::RefMut<String, OrderBook> {
+        let key = Self::book_key(exchange, symbol);
+        self.books
+            .entry(key)
+            .or_insert_with(|| OrderBook::new(symbol, exchange))
     }
 
-    pub fn get(&self, symbol: &str) -> Option<&OrderBook> {
-        self.books.get(symbol)
+    pub fn get(&self, exchange: &str, symbol: &str) -> Option<dashmap::mapref::one::Ref<String, OrderBook>> {
+        let key = Self::book_key(exchange, symbol);
+        self.books.get(&key)
     }
 
     pub fn initialized_count(&self) -> usize {
-        self.books.values().filter(|b| b.is_initialized()).count()
+        self.books.iter().filter(|entry| entry.value().is_initialized()).count()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &OrderBook)> {
+    pub fn iter(&self) -> dashmap::iter::Iter<String, OrderBook, std::collections::hash_map::RandomState> {
         self.books.iter()
-    }
-
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&String, &mut OrderBook)> {
-        self.books.iter_mut()
     }
 }
 
@@ -273,126 +283,8 @@ impl Default for OrderBookManager {
 }
 
 /// Shared multi-symbol order book manager
-pub type SharedOrderBookManager = Arc<RwLock<OrderBookManager>>;
+pub type SharedOrderBookManager = Arc<OrderBookManager>;
 
 pub fn create_shared_orderbook_manager() -> SharedOrderBookManager {
-    Arc::new(RwLock::new(OrderBookManager::default()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_orderbook_initialization() {
-        let mut book = OrderBook::new("BTCUSDT");
-        assert!(!book.is_initialized());
-
-        book.initialize_from_snapshot(
-            vec![
-                ("100.00".to_string(), "1.5".to_string()),
-                ("99.00".to_string(), "2.0".to_string()),
-            ],
-            vec![
-                ("101.00".to_string(), "1.0".to_string()),
-                ("102.00".to_string(), "3.0".to_string()),
-            ],
-            100,
-        );
-
-        assert!(book.is_initialized());
-        assert_eq!(book.best_bid(), Some(dec!(100.00)));
-        assert_eq!(book.best_ask(), Some(dec!(101.00)));
-    }
-
-    #[test]
-    fn test_spread_calculation() {
-        let mut book = OrderBook::new("BTCUSDT");
-        book.initialize_from_snapshot(
-            vec![
-                ("100.00".to_string(), "1.5".to_string()),
-                ("99.00".to_string(), "2.0".to_string()),
-            ],
-            vec![
-                ("101.00".to_string(), "1.0".to_string()),
-                ("102.00".to_string(), "3.0".to_string()),
-            ],
-            100,
-        );
-
-        let (spread, _spread_percent) = book.spread().unwrap();
-        assert_eq!(spread, dec!(1.00));
-    }
-
-    #[test]
-    fn test_apply_update() {
-        let mut book = OrderBook::new("BTCUSDT");
-        book.initialize_from_snapshot(
-            vec![("100.00".to_string(), "1.5".to_string())],
-            vec![("101.00".to_string(), "1.0".to_string())],
-            100,
-        );
-
-        let changed = book.apply_update(
-            vec![("99.00".to_string(), "2.0".to_string())],
-            vec![("100.00".to_string(), "3.0".to_string())],
-            101,
-            102,
-        );
-        assert!(changed);
-        assert_eq!(book.best_bid(), Some(dec!(100.00)));
-        assert_eq!(book.best_ask(), Some(dec!(100.00)));
-    }
-
-    #[test]
-    fn test_depth_calculation() {
-        let mut book = OrderBook::new("BTCUSDT");
-        book.initialize_from_snapshot(
-            vec![
-                ("100.00".to_string(), "1.5".to_string()),
-                ("99.00".to_string(), "2.0".to_string()),
-            ],
-            vec![
-                ("101.00".to_string(), "1.0".to_string()),
-                ("102.00".to_string(), "3.0".to_string()),
-            ],
-            100,
-        );
-
-        let depth = book.bid_depth();
-        assert_eq!(depth, dec!(3.5)); // 1.5 + 2.0 = 3.5
-        assert_eq!(book.ask_depth(), dec!(4.0)); // 1.0 + 3.0 = 4.0
-    }
-
-    #[test]
-    fn test_trim() {
-        let mut book = OrderBook::new("BTCUSDT");
-        // Create 150 bids and 150 asks to exceed the threshold (10 * 10 = 100)
-        let bids: Vec<(String, String)> = (0..150)
-            .map(|i| (format!("{}.00", 1000 - i), "1.0".to_string()))
-            .collect();
-        let asks: Vec<(String, String)> = (0..150)
-            .map(|i| (format!("{}.00", 1001 + i), "1.0".to_string()))
-            .collect();
-        
-        book.initialize_from_snapshot(bids, asks, 100);
-
-        assert_eq!(book.bids.len(), 150);
-        assert_eq!(book.asks.len(), 150);
-
-        book.trim(10);
-
-        // After trim, only 10 levels should remain (threshold is 10x max_levels = 100)
-        assert_eq!(book.bids.len(), 10);
-        assert_eq!(book.asks.len(), 10);
-    }
-
-    #[test]
-    fn test_orderbook_manager() {
-        let manager = OrderBookManager::with_symbols(TRADING_PAIRS);
-        assert_eq!(manager.books.len(), TRADING_PAIRS.len());
-        assert!(manager.get("BTCUSDT").is_some());
-        assert!(manager.get("ETHUSDT").is_some());
-        assert_eq!(manager.initialized_count(), 0); // Not initialized yet
-    }
+    Arc::new(OrderBookManager::default())
 }

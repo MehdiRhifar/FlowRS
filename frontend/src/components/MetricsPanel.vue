@@ -31,7 +31,7 @@ const formatBytes = (bytes: number): string => {
 }
 
 const formatLatency = (us: number): string => {
-  if (us < 1000) return `${us.toFixed(0)}us`
+  if (us < 1000) return `${us.toFixed(0)}µs`
   return `${(us / 1000).toFixed(2)}ms`
 }
 
@@ -80,7 +80,7 @@ const symbolMetrics = computed(() => {
 
       <!-- Latency Stats -->
       <div class="section">
-        <h3>Latency</h3>
+        <h3>Latency per message</h3>
         <div class="metrics-grid">
           <div class="metric">
             <span class="label">Avg</span>

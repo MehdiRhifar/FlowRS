@@ -6,9 +6,16 @@ defineProps<{
   symbol?: string
 }>()
 
+// Exchange colors
+const exchangeColors: Record<string, string> = {
+  'Binance': '#f0b90b',
+  'Bybit': '#f7a600',
+  'OKX': '#00c087',
+}
+
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp)
-  return date.toLocaleTimeString('en-US', { 
+  return date.toLocaleTimeString('en-US', {
     hour12: false,
     hour: '2-digit',
     minute: '2-digit',
@@ -25,6 +32,10 @@ function formatPrice(price: string): string {
 
 function formatQuantity(qty: string): string {
   return parseFloat(qty).toFixed(4)
+}
+
+function getExchangeColor(exchange: string): string {
+  return exchangeColors[exchange] || '#888'
 }
 </script>
 
@@ -44,6 +55,13 @@ function formatQuantity(qty: string): string {
         :class="trade.side"
       >
         <span class="time">{{ formatTime(trade.timestamp) }}</span>
+        <span
+          class="exchange-badge-small"
+          :style="{ backgroundColor: getExchangeColor(trade.exchange) }"
+          :title="trade.exchange"
+        >
+          {{ trade.exchange.substring(0, 3) }}
+        </span>
         <span class="side">{{ trade.side.toUpperCase() }}</span>
         <span class="quantity">{{ formatQuantity(trade.quantity) }}</span>
         <span class="price">@ {{ formatPrice(trade.price) }}</span>
@@ -97,8 +115,8 @@ h2 {
 
 .trade {
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
-  gap: 12px;
+  grid-template-columns: auto auto auto 1fr auto;
+  gap: 8px;
   padding: 6px 8px;
   font-family: 'Monaco', 'Menlo', monospace;
   font-size: 12px;
@@ -108,6 +126,16 @@ h2 {
 
 .time {
   color: #666;
+}
+
+.exchange-badge-small {
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #000;
+  text-transform: uppercase;
+  cursor: help;
 }
 
 .side {

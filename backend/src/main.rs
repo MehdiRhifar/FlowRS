@@ -1,9 +1,12 @@
-mod binance;
+//! Real-time order book aggregator for cryptocurrency exchanges
+
+mod exchanges;
 mod metrics;
 mod orderbook;
 mod server;
 mod types;
 
+use crate::exchanges::{BinanceConn, BybitConn, ExchangeConnector, ExchangeManager};
 use crate::metrics::create_shared_metrics;
 use crate::orderbook::create_shared_orderbook_manager;
 use crate::types::{ClientMessage, TRADING_PAIRS};
@@ -26,49 +29,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Starting Order Book Visualizer Backend");
     tracing::info!("Tracking {} trading pairs: {:?}", TRADING_PAIRS.len(), TRADING_PAIRS);
 
-    // Create shared state
     let orderbook_manager = create_shared_orderbook_manager();
     let metrics = create_shared_metrics();
+    let (client_broadcast_tx, _) = broadcast::channel::<ClientMessage>(BROADCAST_CAPACITY);
 
-    // Create broadcast channel for client updates
-    let (tx, _rx) = broadcast::channel::<ClientMessage>(BROADCAST_CAPACITY);
+    let symbols: Vec<String> = TRADING_PAIRS.iter().map(|s| s.to_string()).collect();
+    let exchange_connectors = vec![
+        ExchangeConnector::Binance(BinanceConn::new(symbols.clone())),
+        ExchangeConnector::Bybit(BybitConn::new(symbols.clone())),
+    ];
 
-    // Clone for different tasks
-    let orderbook_binance = orderbook_manager.clone();
-    let metrics_binance = metrics.clone();
-    let tx_binance = tx.clone();
+    tracing::info!("Configured {} exchange(s)", exchange_connectors.len());
+    for connector in &exchange_connectors {
+        tracing::info!("  • {}", connector.exchange().name());
+    }
 
-    let orderbook_server = orderbook_manager.clone();
-    let metrics_server = metrics.clone();
-    let tx_server = tx.clone();
+    let exchange_manager = ExchangeManager::new(
+        exchange_connectors,
+        orderbook_manager.clone(),
+        metrics.clone(),
+    );
 
-    let orderbook_metrics = orderbook_manager.clone();
-    let metrics_ticker = metrics.clone();
-    let tx_metrics = tx.clone();
+    // Broadcast metrics every second
+    let _metrics_ticker = {
+        let orderbook_manager = orderbook_manager.clone();
+        let metrics = metrics.clone();
+        let broadcast_tx = client_broadcast_tx.clone();
 
-    // Start metrics ticker (sends metrics every second)
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            let current_metrics = metrics_ticker.compute_metrics(Some(&orderbook_metrics)).await;
-            let msg = ClientMessage::Metrics(current_metrics);
-            let _ = tx_metrics.send(msg);
-        }
-    });
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let current_metrics = metrics.compute_metrics(Some(&orderbook_manager)).await;
+                let _ = broadcast_tx.send(ClientMessage::Metrics(current_metrics));
+            }
+        })
+    };
 
-    // Start Binance connection (with automatic reconnection)
-    tokio::spawn(async move {
-        if let Err(e) =
-            binance::start_binance_connection(orderbook_binance, metrics_binance, tx_binance).await
-        {
-            tracing::error!("Binance connection fatal error: {}", e);
-        }
-    });
+    let _exchange_handles = exchange_manager
+        .start_all(client_broadcast_tx.clone())
+        .await;
 
-    // Start WebSocket server
     tracing::info!("Starting WebSocket server on {}", SERVER_ADDR);
-    server::start_server(SERVER_ADDR, orderbook_server, metrics_server, tx_server).await?;
+    server::start_server(
+        SERVER_ADDR,
+        orderbook_manager,
+        metrics,
+        client_broadcast_tx,
+    )
+    .await?;
 
     Ok(())
 }

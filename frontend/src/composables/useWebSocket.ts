@@ -6,7 +6,7 @@ const MAX_TRADES = 50
 const RECONNECT_DELAY = 3000
 
 export function useWebSocket() {
-  // Store books per symbol
+  // Store books per exchange+symbol (key format: "exchange:symbol")
   const books = ref<Record<string, BookUpdate>>({})
   // Store trades per symbol (and all trades combined)
   const allTrades = ref<Trade[]>([])
@@ -16,13 +16,25 @@ export function useWebSocket() {
   const error = ref<string | null>(null)
   const symbols = ref<string[]>([])
   const selectedSymbol = ref<string>('BTCUSDT')
+  const enabledExchanges = ref<Set<string>>(new Set(['Binance', 'Bybit']))
 
   let ws: WebSocket | null = null
   let reconnectTimeout: number | null = null
 
-  // Computed: current book for selected symbol
-  const book = computed(() => books.value[selectedSymbol.value] || null)
-  
+  // Computed: all books for selected symbol (from all enabled exchanges)
+  const symbolBooks = computed(() => {
+    const result: BookUpdate[] = []
+    for (const [key, bookUpdate] of Object.entries(books.value)) {
+      if (bookUpdate.symbol === selectedSymbol.value && enabledExchanges.value.has(bookUpdate.exchange)) {
+        result.push(bookUpdate)
+      }
+    }
+    return result
+  })
+
+  // Computed: legacy single book (for backwards compatibility) - returns first book
+  const book = computed(() => symbolBooks.value[0] || null)
+
   // Computed: trades for selected symbol
   const trades = computed(() => tradesBySymbol.value[selectedSymbol.value] || [])
 
@@ -72,7 +84,9 @@ export function useWebSocket() {
         break
         
       case 'book_update':
-        books.value[message.data.symbol] = message.data
+        // Store with composite key: "exchange:symbol"
+        const bookKey = `${message.data.exchange}:${message.data.symbol}`
+        books.value[bookKey] = message.data
         break
         
       case 'trade':
@@ -121,6 +135,16 @@ export function useWebSocket() {
     selectedSymbol.value = symbol
   }
 
+  function toggleExchange(exchange: string) {
+    if (enabledExchanges.value.has(exchange)) {
+      enabledExchanges.value.delete(exchange)
+    } else {
+      enabledExchanges.value.add(exchange)
+    }
+    // Trigger reactivity
+    enabledExchanges.value = new Set(enabledExchanges.value)
+  }
+
   function handleVisibilityChange() {
     if (document.visibilityState === 'visible') {
       console.log('Tab became visible, reconnecting WebSocket for fresh state...')
@@ -144,11 +168,15 @@ export function useWebSocket() {
     trades,
     // Multi-symbol
     books,
+    symbolBooks,
     allTrades,
     tradesBySymbol,
     symbols,
     selectedSymbol,
     selectSymbol,
+    // Exchange filtering
+    enabledExchanges,
+    toggleExchange,
     // Global
     metrics,
     connected,

@@ -4,6 +4,7 @@ export interface PriceLevel {
 }
 
 export interface BookUpdate {
+  exchange: string
   symbol: string
   bids: PriceLevel[]
   asks: PriceLevel[]
@@ -14,6 +15,7 @@ export interface BookUpdate {
 }
 
 export interface Trade {
+  exchange: string
   symbol: string
   price: string
   quantity: string

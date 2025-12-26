@@ -2,8 +2,11 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Number of price levels to send to clients
-pub const ORDERBOOK_DEPTH: usize = 10;
+/// Number of price levels to store in memory
+pub const ORDERBOOK_DEPTH: usize = 50;
+
+/// Number of price levels to send to clients (optimisation)
+pub const ORDERBOOK_DISPLAY_DEPTH: usize = 5;
 
 /// Trading pairs supported
 pub const TRADING_PAIRS: &[&str] = &[
@@ -36,6 +39,7 @@ pub enum TradeSide {
 /// A single trade
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Trade {
+    pub exchange: String,
     pub symbol: String,
     pub price: Decimal,
     pub quantity: Decimal,
@@ -98,6 +102,7 @@ pub struct Metrics {
 #[serde(rename_all = "snake_case")]
 pub enum ClientMessage {
     BookUpdate {
+        exchange: String,
         symbol: String,
         bids: Vec<PriceLevel>,
         asks: Vec<PriceLevel>,
@@ -108,11 +113,8 @@ pub enum ClientMessage {
     },
     Trade(Trade),
     Metrics(Metrics),
-    /// Initial list of available symbols
     SymbolList(Vec<String>),
 }
-
-// ============ Binance API Types ============
 
 /// Binance depth snapshot response
 #[derive(Debug, Deserialize)]
@@ -193,6 +195,7 @@ impl BinanceAggTrade {
             TradeSide::Buy
         };
         Some(Trade {
+            exchange: "Binance".to_string(),
             symbol: self.symbol.clone(),
             price,
             quantity,
