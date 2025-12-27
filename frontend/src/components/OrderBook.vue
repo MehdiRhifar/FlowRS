@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { BookUpdate, PriceLevel } from '../types'
+import type { BookUpdate } from '../types'
+import { getExchangeColor } from '../constants'
 
 const props = defineProps<{
   books: BookUpdate[]
@@ -12,13 +13,6 @@ const baseAsset = computed(() => {
   if (!props.symbol) return 'Asset'
   return props.symbol.replace('USDT', '')
 })
-
-// Exchange colors for badges
-const exchangeColors: Record<string, string> = {
-  'Binance': '#f0b90b',
-  'Bybit': '#f7a600',
-  'OKX': '#00c087',
-}
 
 interface AggregatedLevel {
   price: string
@@ -129,10 +123,6 @@ function getBarWidth(quantity: string): string {
   const pct = (parseFloat(quantity) / maxQuantity.value) * 100
   return `${Math.min(pct, 100)}%`
 }
-
-function getExchangeColor(exchange: string): string {
-  return exchangeColors[exchange] || '#888'
-}
 </script>
 
 <template>
@@ -166,7 +156,7 @@ function getExchangeColor(exchange: string): string {
       <!-- Asks (reversed to show lowest at bottom) -->
       <div class="levels asks">
         <div
-          v-for="(level, i) in [...aggregatedAsks].reverse()"
+          v-for="level in [...aggregatedAsks].reverse()"
           :key="'ask-' + level.price"
           class="level ask"
         >
@@ -197,7 +187,7 @@ function getExchangeColor(exchange: string): string {
       <!-- Bids -->
       <div class="levels bids">
         <div
-          v-for="(level, i) in aggregatedBids"
+          v-for="level in aggregatedBids"
           :key="'bid-' + level.price"
           class="level bid"
         >

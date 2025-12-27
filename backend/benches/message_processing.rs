@@ -221,7 +221,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
     // Test 1: Pipeline complet avec vraie OrderBook
     group.bench_function("real_depth_update_pipeline", |b| {
         // Setup: créer un OrderBook initialisé
-        let mut book = OrderBook::new("BTCUSDT");
+        let mut book = OrderBook::new("BTCUSDT", "binancebinance");
         book.initialize_from_snapshot(
             vec![("50000.00".to_string(), "1.0".to_string())],
             vec![("50001.00".to_string(), "1.0".to_string())],
@@ -248,7 +248,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
 
     // Test 2: Pipeline complet + génération du message client
     group.bench_function("real_pipeline_with_client_message", |b| {
-        let mut book = OrderBook::new("BTCUSDT");
+        let mut book = OrderBook::new("BTCUSDT", "binance");
         book.initialize_from_snapshot(
             vec![("50000.00".to_string(), "1.0".to_string())],
             vec![("50001.00".to_string(), "1.0".to_string())],
