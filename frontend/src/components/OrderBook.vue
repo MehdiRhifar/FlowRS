@@ -20,16 +20,36 @@ interface AggregatedLevel {
   exchanges: Array<{ name: string, quantity: string }>
 }
 
+// Normalize price to fixed precision for grouping
+function normalizePrice(price: string): string {
+  const numPrice = parseFloat(price)
+  // Progressive precision based on price magnitude
+  let decimals: number
+  if (numPrice >= 1000) {
+    decimals = 2  // BTC ~87,000: 87414.70
+  } else if (numPrice >= 100) {
+    decimals = 3  // Mid-range: 143.456
+  } else if (numPrice >= 10) {
+    decimals = 4  // 12.3456
+  } else if (numPrice >= 1) {
+    decimals = 5  // 1.81234 (not 1.81!)
+  } else {
+    decimals = 8  // Low-value coins: 0.12345678
+  }
+  return numPrice.toFixed(decimals)
+}
+
 // Aggregate bids from all exchanges
 const aggregatedBids = computed((): AggregatedLevel[] => {
   const priceMap = new Map<string, Array<{ name: string, quantity: string }>>()
 
   for (const book of props.books) {
     for (const bid of book.bids) {
-      if (!priceMap.has(bid.price)) {
-        priceMap.set(bid.price, [])
+      const normalizedPrice = normalizePrice(bid.price)
+      if (!priceMap.has(normalizedPrice)) {
+        priceMap.set(normalizedPrice, [])
       }
-      priceMap.get(bid.price)!.push({
+      priceMap.get(normalizedPrice)!.push({
         name: book.exchange,
         quantity: bid.quantity
       })
@@ -47,7 +67,6 @@ const aggregatedBids = computed((): AggregatedLevel[] => {
       }
     })
     .sort((a, b) => parseFloat(b.price) - parseFloat(a.price))
-    .slice(0, 15) // Top 15 levels
 })
 
 // Aggregate asks from all exchanges
@@ -56,10 +75,11 @@ const aggregatedAsks = computed((): AggregatedLevel[] => {
 
   for (const book of props.books) {
     for (const ask of book.asks) {
-      if (!priceMap.has(ask.price)) {
-        priceMap.set(ask.price, [])
+      const normalizedPrice = normalizePrice(ask.price)
+      if (!priceMap.has(normalizedPrice)) {
+        priceMap.set(normalizedPrice, [])
       }
-      priceMap.get(ask.price)!.push({
+      priceMap.get(normalizedPrice)!.push({
         name: book.exchange,
         quantity: ask.quantity
       })
@@ -77,7 +97,6 @@ const aggregatedAsks = computed((): AggregatedLevel[] => {
       }
     })
     .sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
-    .slice(0, 15) // Top 15 levels
 })
 
 // Calculate max quantity for volume bar scaling

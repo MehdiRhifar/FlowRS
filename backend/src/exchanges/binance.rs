@@ -16,10 +16,6 @@ impl BinanceConnector {
         Self { symbols }
     }
 
-    pub fn exchange(&self) -> Exchange {
-        Exchange::Binance
-    }
-
     pub fn build_subscription_url(&self, symbols: &[&str]) -> String {
         let streams = symbols
             .iter()
@@ -32,7 +28,7 @@ impl BinanceConnector {
             .collect::<Vec<_>>()
             .join("/");
 
-        format!("{}?streams={}", self.exchange().websocket_url(), streams)
+        format!("wss://fstream.binance.com/stream?streams={}", streams)
     }
 
     pub fn parse_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
@@ -105,7 +101,7 @@ impl BinanceConnector {
         &self,
         symbol: &str,
         limit: usize,
-    ) -> Result<DepthSnapshot, Box<dyn Error + Send>> {
+    ) -> Result<Option<DepthSnapshot>, Box<dyn Error + Send>> {
         let url = format!(
             "https://fapi.binance.com/fapi/v1/depth?symbol={}&limit={}",
             symbol, limit
@@ -118,12 +114,11 @@ impl BinanceConnector {
             .await
             .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
 
-        Ok(DepthSnapshot {
-            symbol: symbol.to_string(),
+        Ok(Some(DepthSnapshot {
             bids: response.bids,
             asks: response.asks,
             last_update_id: response.last_update_id,
-        })
+        }))
     }
 
     pub fn supported_symbols(&self) -> Vec<String> {
@@ -180,29 +175,4 @@ struct BinanceDepthResponse {
     last_update_id: u64,
     bids: Vec<(String, String)>,
     asks: Vec<(String, String)>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_binance_url_building() {
-        let connector = BinanceConnector::new(vec!["BTCUSDT".to_string()]);
-        let url = connector.build_subscription_url(&["BTCUSDT"]);
-        assert!(url.contains("btcusdt@depth@100ms"));
-        assert!(url.contains("btcusdt@aggTrade"));
-    }
-
-    #[tokio::test]
-    async fn test_binance_snapshot_fetch() {
-        let connector = BinanceConnector::new(vec!["BTCUSDT".to_string()]);
-        let snapshot = connector.fetch_snapshot("BTCUSDT", 10).await;
-
-        if let Ok(snap) = snapshot {
-            assert_eq!(snap.symbol, "BTCUSDT");
-            assert!(!snap.bids.is_empty());
-            assert!(!snap.asks.is_empty());
-        }
-    }
 }

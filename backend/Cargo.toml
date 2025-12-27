@@ -1,5 +1,5 @@
 [package]
-name = "flowRS-backend"
+name = "flow-rs-backend"
 version = "0.1.0"
 edition = "2021"
 description = "Real-time order book visualizer backend"

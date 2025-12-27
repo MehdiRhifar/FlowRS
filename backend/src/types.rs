@@ -2,23 +2,23 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Number of price levels to store in memory
-pub const ORDERBOOK_DEPTH: usize = 50;
+/// Number of price levels to store in memory (auto-trimmed after each update)
+pub const ORDERBOOK_DEPTH: usize = 10;
 
 /// Number of price levels to send to clients (optimisation)
-pub const ORDERBOOK_DISPLAY_DEPTH: usize = 5;
+pub const ORDERBOOK_DISPLAY_DEPTH: usize = 3;
 
 /// Trading pairs supported
 pub const TRADING_PAIRS: &[&str] = &[
     "BTCUSDT",
     "ETHUSDT",
-    "BNBUSDT",
     "SOLUSDT",
     "XRPUSDT",
     "DOGEUSDT",
     "ADAUSDT",
     "AVAXUSDT",
     "DOTUSDT",
+    "LINKUSDT",
 ];
 
 /// Price level in the order book
@@ -116,32 +116,6 @@ pub enum ClientMessage {
     SymbolList(Vec<String>),
 }
 
-/// Binance depth snapshot response
-/// Used by benchmarks and exchanges/binance.rs
-#[derive(Debug, Deserialize)]
-pub struct BinanceDepthSnapshot {
-    #[serde(rename = "lastUpdateId")]
-    pub last_update_id: u64,
-    pub bids: Vec<(String, String)>,
-    pub asks: Vec<(String, String)>,
-}
-
-/// Binance stream message for depth updates
-/// Used by benchmarks and exchanges/binance.rs
-#[derive(Debug, Deserialize)]
-pub struct BinanceDepthStream {
-    pub stream: String,
-    pub data: BinanceDepthUpdate,
-}
-
-/// Binance stream message for trades
-/// Used by benchmarks and exchanges/binance.rs
-#[derive(Debug, Deserialize)]
-pub struct BinanceTradeStream {
-    pub stream: String,
-    pub data: BinanceAggTrade,
-}
-
 /// Binance depth update event
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -188,42 +162,3 @@ pub struct BinanceAggTrade {
     pub is_buyer_maker: bool,
 }
 
-impl BinanceAggTrade {
-    pub fn to_trade(&self) -> Option<Trade> {
-        let price = self.price.parse().ok()?;
-        let quantity = self.quantity.parse().ok()?;
-        let side = if self.is_buyer_maker {
-            TradeSide::Sell
-        } else {
-            TradeSide::Buy
-        };
-        Some(Trade {
-            exchange: "Binance".to_string(),
-            symbol: self.symbol.clone(),
-            price,
-            quantity,
-            side,
-            timestamp: self.trade_time,
-        })
-    }
-}
-
-/// Helper to build Binance stream URLs for multiple symbols
-pub fn build_binance_ws_url(symbols: &[&str]) -> String {
-    let streams: Vec<String> = symbols
-        .iter()
-        .flat_map(|s| {
-            let lower = s.to_lowercase();
-            vec![
-                format!("{}@depth@100ms", lower),
-                format!("{}@aggTrade", lower),
-            ]
-        })
-        .collect();
-    format!("wss://fstream.binance.com/stream?streams={}", streams.join("/"))
-}
-
-/// Helper to build Binance REST URL for depth snapshot
-pub fn build_binance_rest_url(symbol: &str) -> String {
-    format!("https://fapi.binance.com/fapi/v1/depth?symbol={}&limit=10", symbol.to_uppercase())
-}

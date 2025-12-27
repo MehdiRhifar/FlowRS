@@ -6,7 +6,7 @@ mod orderbook;
 mod server;
 mod types;
 
-use crate::exchanges::{BinanceConn, BybitConn, ExchangeConnector, ExchangeManager};
+use crate::exchanges::{BinanceConn, BybitConn, CoinbaseConn, KrakenConn, ExchangeConnector, ExchangeManager};
 use crate::metrics::create_shared_metrics;
 use crate::orderbook::create_shared_orderbook_manager;
 use crate::types::{ClientMessage, TRADING_PAIRS};
@@ -37,6 +37,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let exchange_connectors = vec![
         ExchangeConnector::Binance(BinanceConn::new(symbols.clone())),
         ExchangeConnector::Bybit(BybitConn::new(symbols.clone())),
+        ExchangeConnector::Coinbase(CoinbaseConn::new(symbols.clone())),
+        ExchangeConnector::Kraken(KrakenConn::new(symbols.clone())),
     ];
 
     tracing::info!("Configured {} exchange(s)", exchange_connectors.len());
@@ -66,18 +68,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         })
     };
 
-    let _exchange_handles = exchange_manager
+    let exchange_handles = exchange_manager
         .start_all(client_broadcast_tx.clone())
         .await;
 
     tracing::info!("Starting WebSocket server on {}", SERVER_ADDR);
-    server::start_server(
+    let server_result = server::start_server(
         SERVER_ADDR,
         orderbook_manager,
         metrics,
         client_broadcast_tx,
     )
-    .await?;
+    .await;
 
-    Ok(())
+    // Keep exchange handles alive
+    drop(exchange_handles);
+
+    server_result
 }

@@ -2,6 +2,8 @@
 
 pub mod binance;
 pub mod bybit;
+pub mod coinbase;
+pub mod kraken;
 pub mod manager;
 
 use rust_decimal::Decimal;
@@ -13,12 +15,16 @@ use crate::types::Trade;
 pub use manager::ExchangeManager;
 pub use binance::BinanceConnector as BinanceConn;
 pub use bybit::BybitConnector as BybitConn;
+pub use coinbase::CoinbaseConnector as CoinbaseConn;
+pub use kraken::KrakenConnector as KrakenConn;
 
 /// Exchange identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Exchange {
     Binance,
     Bybit,
+    Coinbase,
+    Kraken,
 }
 
 impl Exchange {
@@ -26,15 +32,11 @@ impl Exchange {
         match self {
             Exchange::Binance => "Binance",
             Exchange::Bybit => "Bybit",
+            Exchange::Coinbase => "Coinbase",
+            Exchange::Kraken => "Kraken",
         }
     }
 
-    pub fn websocket_url(&self) -> &'static str {
-        match self {
-            Exchange::Binance => "wss://fstream.binance.com/stream",
-            Exchange::Bybit => "wss://stream.bybit.com/v5/public/linear",
-        }
-    }
 }
 
 /// Normalized market data message from any exchange
@@ -61,6 +63,8 @@ pub enum MarketMessage {
 pub enum ExchangeConnector {
     Binance(BinanceConn),
     Bybit(BybitConn),
+    Coinbase(CoinbaseConn),
+    Kraken(KrakenConn),
 }
 
 impl ExchangeConnector {
@@ -69,6 +73,8 @@ impl ExchangeConnector {
         match self {
             ExchangeConnector::Binance(_) => Exchange::Binance,
             ExchangeConnector::Bybit(_) => Exchange::Bybit,
+            ExchangeConnector::Coinbase(_) => Exchange::Coinbase,
+            ExchangeConnector::Kraken(_) => Exchange::Kraken,
         }
     }
 
@@ -77,6 +83,8 @@ impl ExchangeConnector {
         match self {
             ExchangeConnector::Binance(b) => b.build_subscription_url(symbols),
             ExchangeConnector::Bybit(b) => b.build_subscription_url(symbols),
+            ExchangeConnector::Coinbase(c) => c.build_subscription_url(symbols),
+            ExchangeConnector::Kraken(k) => k.build_subscription_url(symbols),
         }
     }
 
@@ -85,18 +93,23 @@ impl ExchangeConnector {
         match self {
             ExchangeConnector::Binance(b) => b.parse_message(raw),
             ExchangeConnector::Bybit(b) => b.parse_message(raw),
+            ExchangeConnector::Coinbase(c) => c.parse_message(raw),
+            ExchangeConnector::Kraken(k) => k.parse_message(raw),
         }
     }
 
     /// Fetch initial order book snapshot via REST API
+    /// Returns Ok(None) if the exchange uses WebSocket snapshots instead
     pub async fn fetch_snapshot(
         &self,
         symbol: &str,
         limit: usize,
-    ) -> Result<DepthSnapshot, Box<dyn Error + Send>> {
+    ) -> Result<Option<DepthSnapshot>, Box<dyn Error + Send>> {
         match self {
             ExchangeConnector::Binance(b) => b.fetch_snapshot(symbol, limit).await,
-            ExchangeConnector::Bybit(b) => { b.fetch_snapshot(symbol, limit).await },
+            ExchangeConnector::Bybit(b) => b.fetch_snapshot(symbol, limit).await,
+            ExchangeConnector::Coinbase(c) => c.fetch_snapshot(symbol, limit).await,
+            ExchangeConnector::Kraken(k) => k.fetch_snapshot(symbol, limit).await,
         }
     }
 
@@ -105,14 +118,19 @@ impl ExchangeConnector {
         match self {
             ExchangeConnector::Binance(b) => b.supported_symbols(),
             ExchangeConnector::Bybit(b) => b.supported_symbols(),
+            ExchangeConnector::Coinbase(c) => c.supported_symbols(),
+            ExchangeConnector::Kraken(k) => k.supported_symbols(),
         }
     }
 
-    /// Get subscription message to send after WebSocket connection (if needed)
-    pub fn get_subscription_message(&self, symbols: &[&str]) -> Option<String> {
+    /// Get subscription messages to send after WebSocket connection (if needed)
+    /// Returns a list of subscription messages to send sequentially
+    pub fn get_subscription_messages(&self, symbols: &[&str]) -> Vec<String> {
         match self {
-            ExchangeConnector::Binance(_) => None, // Binance subscribes via URL
-            ExchangeConnector::Bybit(b) => b.get_subscription_message(symbols),
+            ExchangeConnector::Binance(_) => vec![], // Binance subscribes via URL
+            ExchangeConnector::Bybit(b) => b.get_subscription_messages(symbols),
+            ExchangeConnector::Coinbase(c) => c.get_subscription_messages(),
+            ExchangeConnector::Kraken(k) => k.get_subscription_messages(),
         }
     }
 }
@@ -120,7 +138,6 @@ impl ExchangeConnector {
 /// Order book snapshot from REST API
 #[derive(Debug, Clone)]
 pub struct DepthSnapshot {
-    pub symbol: String,
     pub bids: Vec<(String, String)>,
     pub asks: Vec<(String, String)>,
     pub last_update_id: u64,
@@ -134,5 +151,7 @@ mod tests {
     fn test_exchange_names() {
         assert_eq!(Exchange::Binance.name(), "Binance");
         assert_eq!(Exchange::Bybit.name(), "Bybit");
+        assert_eq!(Exchange::Coinbase.name(), "Coinbase");
+        assert_eq!(Exchange::Kraken.name(), "Kraken");
     }
 }

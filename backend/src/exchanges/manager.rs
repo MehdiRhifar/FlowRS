@@ -3,7 +3,7 @@
 use super::{ExchangeConnector, MarketMessage};
 use crate::metrics::SharedMetrics;
 use crate::orderbook::SharedOrderBookManager;
-use crate::types::{ClientMessage, ORDERBOOK_DEPTH, ORDERBOOK_DISPLAY_DEPTH};
+use crate::types::{ClientMessage, ORDERBOOK_DISPLAY_DEPTH};
 use futures_util::{SinkExt, StreamExt};
 use std::error::Error;
 use std::sync::Arc;
@@ -39,6 +39,8 @@ impl ExchangeManager {
         client_broadcast_tx: broadcast::Sender<ClientMessage>,
     ) -> Vec<tokio::task::JoinHandle<()>> {
         let mut handles = vec![];
+
+        tracing::info!("Starting {} exchange connection(s)", self.connectors.len());
 
         for connector in &self.connectors {
             let connector = connector.clone();
@@ -144,36 +146,26 @@ impl ExchangeManager {
         Ok(())
     }
 
-    /// Initialize orderbooks from REST API snapshots (skip for exchanges that send initial snapshot via WebSocket)
+    /// Initialize orderbooks from REST API snapshots (if needed)
+    ///
+    /// Exchanges that use WebSocket snapshots (Kraken, Coinbase, Bybit) return Ok(None).
+    /// Only Binance currently fetches REST snapshots.
     async fn initialize_orderbooks_from_rest(
         connector: &ExchangeConnector,
         symbols: &[&str],
         orderbook_manager: &SharedOrderBookManager,
         exchange_name: &str,
     ) {
-        let exchange = connector.exchange();
-        let skip_rest_snapshot = matches!(exchange, super::Exchange::Bybit);
-
-        if skip_rest_snapshot {
-            tracing::info!(
-                "[{}] Skipping REST snapshot fetch (WebSocket sends initial snapshot)",
-                exchange_name
-            );
-            return;
-        }
-
-        tracing::info!("[{}] Fetching initial snapshots...", exchange_name);
         let mut initialized_count = 0;
 
         for symbol in symbols {
-            tracing::info!(
-                "[{}] Fetching initial order book snapshot for {}...",
-                exchange_name,
-                symbol
-            );
-
             match connector.fetch_snapshot(symbol, 10).await {
-                Ok(snapshot) => {
+                Ok(Some(snapshot)) => {
+                    tracing::debug!(
+                        "[{}] REST snapshot for {}",
+                        exchange_name,
+                        symbol
+                    );
                     let mut book = orderbook_manager.get_or_create(exchange_name, symbol);
                     book.initialize_from_snapshot(
                         snapshot.bids,
@@ -182,9 +174,17 @@ impl ExchangeManager {
                     );
                     initialized_count += 1;
                 }
+                Ok(None) => {
+                    // Exchange uses WebSocket snapshots - skip REST fetch
+                    tracing::debug!(
+                        "[{}] {} uses WebSocket snapshots",
+                        exchange_name,
+                        symbol
+                    );
+                }
                 Err(e) => {
-                    tracing::error!(
-                        "[{}] Failed to fetch snapshot for {}: {}",
+                    tracing::warn!(
+                        "[{}] Snapshot fetch failed for {}: {}",
                         exchange_name,
                         symbol,
                         e
@@ -193,12 +193,14 @@ impl ExchangeManager {
             }
         }
 
-        tracing::info!(
-            "[{}] Initialized {}/{} order books",
-            exchange_name,
-            initialized_count,
-            symbols.len()
-        );
+        if initialized_count > 0 {
+            tracing::info!(
+                "[{}] Initialized {}/{} order books from REST",
+                exchange_name,
+                initialized_count,
+                symbols.len()
+            );
+        }
     }
 
     /// Connect to exchange WebSocket
@@ -243,12 +245,18 @@ impl ExchangeManager {
         >,
         exchange_name: &str,
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
-        if let Some(sub_msg) = connector.get_subscription_message(symbols) {
-            tracing::info!("[{}] Sending subscription message...", exchange_name);
-            exchange_ws_write
-                .send(WsMessage::Text(sub_msg.into()))
-                .await?;
-            tracing::info!("[{}] Subscription sent", exchange_name);
+        let sub_messages = connector.get_subscription_messages(symbols);
+        if !sub_messages.is_empty() {
+            tracing::info!("[{}] Sending {} subscription message(s)...", exchange_name, sub_messages.len());
+
+            for (i, sub_msg) in sub_messages.iter().enumerate() {
+                tracing::debug!("[{}] Sending subscription #{}: {}", exchange_name, i + 1, sub_msg);
+                exchange_ws_write
+                    .send(WsMessage::Text(sub_msg.clone().into()))
+                    .await?;
+            }
+
+            tracing::info!("[{}] All subscriptions sent", exchange_name);
         }
         Ok(())
     }
@@ -370,15 +378,10 @@ impl ExchangeManager {
 
                     if is_snapshot {
                         book.initialize_from_snapshot(bids_str, asks_str, update_id);
-                        book.trim(ORDERBOOK_DEPTH);
-                        tracing::info!("[{}] Orderbook reset from snapshot: {}", exchange_name, symbol);
+                        tracing::debug!("[{}] Snapshot received for {}", exchange_name, symbol);
                         true
                     } else {
-                        let changed = book.apply_update(bids_str, asks_str, 0, update_id);
-                        if changed {
-                            book.trim(ORDERBOOK_DEPTH);
-                        }
-                        changed
+                        book.apply_update(bids_str, asks_str, 0, update_id)
                     }
                 };
 

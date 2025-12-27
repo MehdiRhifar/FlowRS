@@ -15,13 +15,30 @@ impl BybitConnector {
         Self { symbols }
     }
 
-    pub fn exchange(&self) -> Exchange {
-        Exchange::Bybit
-    }
-
     pub fn build_subscription_url(&self, _symbols: &[&str]) -> String {
         // Bybit uses a different subscription model (subscribe after connection)
-        self.exchange().websocket_url().to_string()
+        "wss://stream.bybit.com/v5/public/linear".to_string()
+    }
+
+
+    /// Build subscription messages for Bybit WebSocket
+    pub fn get_subscription_messages(&self, symbols: &[&str]) -> Vec<String> {
+        let args: Vec<String> = symbols
+            .iter()
+            .flat_map(|s| {
+                vec![
+                    format!("orderbook.50.{}", s),
+                    format!("publicTrade.{}", s),
+                ]
+            })
+            .collect();
+
+        let subscription = serde_json::json!({
+            "op": "subscribe",
+            "args": args
+        });
+
+        vec![subscription.to_string()]
     }
 
     pub fn parse_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
@@ -123,75 +140,17 @@ impl BybitConnector {
         Ok(None)
     }
 
+    /// Bybit sends initial snapshot via WebSocket, so REST fetch not needed
     pub async fn fetch_snapshot(
         &self,
-        symbol: &str,
-        limit: usize,
-    ) -> Result<DepthSnapshot, Box<dyn Error + Send>> {
-        let url = format!(
-            "https://api.bybit.com/v5/market/orderbook?category=linear&symbol={}&limit={}",
-            symbol, limit
-        );
-
-        let response: serde_json::Value = reqwest::get(&url)
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?
-            .json()
-            .await
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-
-        let result = &response["result"];
-        let bids: Vec<(String, String)> = result["b"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|item| {
-                let price = item[0].as_str()?.to_string();
-                let qty = item[1].as_str()?.to_string();
-                Some((price, qty))
-            })
-            .collect();
-
-        let asks: Vec<(String, String)> = result["a"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|item| {
-                let price = item[0].as_str()?.to_string();
-                let qty = item[1].as_str()?.to_string();
-                Some((price, qty))
-            })
-            .collect();
-
-        Ok(DepthSnapshot {
-            symbol: symbol.to_string(),
-            bids,
-            asks,
-            last_update_id: result["u"].as_u64().unwrap_or(0),
-        })
+        _symbol: &str,
+        _limit: usize,
+    ) -> Result<Option<DepthSnapshot>, Box<dyn Error + Send>> {
+        // Bybit will send snapshot via WebSocket after subscription - no need for REST fetch
+        Ok(None)
     }
 
     pub fn supported_symbols(&self) -> Vec<String> {
         self.symbols.clone()
-    }
-
-    /// Build subscription message for Bybit WebSocket
-    pub fn get_subscription_message(&self, symbols: &[&str]) -> Option<String> {
-        let args: Vec<String> = symbols
-            .iter()
-            .flat_map(|s| {
-                vec![
-                    format!("orderbook.50.{}", s),
-                    format!("publicTrade.{}", s),
-                ]
-            })
-            .collect();
-
-        let subscription = serde_json::json!({
-            "op": "subscribe",
-            "args": args
-        });
-
-        Some(subscription.to_string())
     }
 }

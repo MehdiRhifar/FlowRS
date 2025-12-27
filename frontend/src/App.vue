@@ -41,7 +41,7 @@ const {
       <div class="exchange-filters">
         <span class="filter-label">Exchanges:</span>
         <button
-          v-for="exchange in ['Binance', 'Bybit']"
+          v-for="exchange in ['Binance', 'Bybit', 'Coinbase', 'Kraken']"
           :key="exchange"
           class="exchange-toggle-btn"
           :class="{ active: enabledExchanges.has(exchange) }"

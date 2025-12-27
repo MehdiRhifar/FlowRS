@@ -1,4 +1,4 @@
-use crate::types::{PriceLevel, ClientMessage, TRADING_PAIRS};
+use crate::types::{PriceLevel, ClientMessage, TRADING_PAIRS, ORDERBOOK_DEPTH};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -64,12 +64,6 @@ impl OrderBook {
 
         self.last_update_id = last_update_id;
         self.initialized = true;
-        tracing::info!(
-            "Order book initialized with {} bids, {} asks, last_update_id: {}",
-            self.bids.len(),
-            self.asks.len(),
-            last_update_id
-        );
     }
 
     /// Check if the book is ready to receive updates
@@ -85,6 +79,7 @@ impl OrderBook {
 
     /// Apply a depth update from WebSocket
     /// Returns true if update was applied (book changed)
+    /// Auto-trims when size exceeds 10x threshold (amortized cost)
     pub fn apply_update(
         &mut self,
         bids: Vec<(String, String)>,
@@ -92,10 +87,6 @@ impl OrderBook {
         _first_update_id: u64,
         final_update_id: u64,
     ) -> bool {
-        if final_update_id <= self.last_update_id {
-            return false;
-        }
-
         let mut changed = false;
 
         for (price_str, qty_str) in bids {
@@ -122,6 +113,8 @@ impl OrderBook {
             }
         }
 
+
+        self.auto_trim(ORDERBOOK_DEPTH);
         self.last_update_id = final_update_id;
         changed
     }
@@ -136,15 +129,13 @@ impl OrderBook {
         self.asks.first_key_value().map(|(price, _)| *price)
     }
 
-    /// Trim threshold - trim only when book exceeds 2x target size
-    const TRIM_THRESHOLD_MULT: usize = 10;
-
     /// Trim the book to keep only the best N levels on each side
     /// This prevents accumulation of stale price levels
     /// Optimization: Only trim when size exceeds threshold to reduce allocations
     /// split_off is efficient as it's a native BTreeMap operation
-    pub fn trim(&mut self, max_levels: usize) {
-        let threshold = max_levels * Self::TRIM_THRESHOLD_MULT;
+    pub fn auto_trim(&mut self, max_levels: usize) {
+        const TRIM_THRESHOLD_MULT: usize = 3;
+        let threshold = max_levels * TRIM_THRESHOLD_MULT;
 
         // For bids: keep the highest prices (at the end of BTreeMap)
         // split_off returns everything >= key, we want to keep that part
@@ -265,10 +256,6 @@ impl OrderBookManager {
     pub fn get(&self, exchange: &str, symbol: &str) -> Option<dashmap::mapref::one::Ref<'_, String, OrderBook>> {
         let key = Self::book_key(exchange, symbol);
         self.books.get(&key)
-    }
-
-    pub fn initialized_count(&self) -> usize {
-        self.books.iter().filter(|entry| entry.value().is_initialized()).count()
     }
 
     pub fn iter(&self) -> dashmap::iter::Iter<'_, String, OrderBook, std::collections::hash_map::RandomState> {

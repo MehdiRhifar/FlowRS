@@ -16,7 +16,7 @@ export function useWebSocket() {
   const error = ref<string | null>(null)
   const symbols = ref<string[]>([])
   const selectedSymbol = ref<string>('BTCUSDT')
-  const enabledExchanges = ref<Set<string>>(new Set(['Binance', 'Bybit']))
+  const enabledExchanges = ref<Set<string>>(new Set(['Binance', 'Bybit', 'Coinbase', 'Kraken']))
 
   let ws: WebSocket | null = null
   let reconnectTimeout: number | null = null
@@ -47,12 +47,10 @@ export function useWebSocket() {
     ws.onopen = () => {
       connected.value = true
       error.value = null
-      console.log('WebSocket connected')
     }
 
     ws.onclose = () => {
       connected.value = false
-      console.log('WebSocket disconnected, reconnecting...')
       scheduleReconnect()
     }
 
@@ -82,7 +80,7 @@ export function useWebSocket() {
           }
         }
         break
-        
+
       case 'book_update':
         // Store with composite key: "exchange:symbol"
         const bookKey = `${message.data.exchange}:${message.data.symbol}`
@@ -147,7 +145,6 @@ export function useWebSocket() {
 
   function handleVisibilityChange() {
     if (document.visibilityState === 'visible') {
-      console.log('Tab became visible, reconnecting WebSocket for fresh state...')
       reconnect()
     }
   }
