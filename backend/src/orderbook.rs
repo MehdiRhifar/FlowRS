@@ -255,14 +255,14 @@ impl OrderBookManager {
     }
 
     /// Get or create an order book for the given exchange and symbol
-    pub fn get_or_create(&self, exchange: &str, symbol: &str) -> dashmap::mapref::one::RefMut<String, OrderBook> {
+    pub fn get_or_create(&self, exchange: &str, symbol: &str) -> dashmap::mapref::one::RefMut<'_, String, OrderBook> {
         let key = Self::book_key(exchange, symbol);
         self.books
             .entry(key)
             .or_insert_with(|| OrderBook::new(symbol, exchange))
     }
 
-    pub fn get(&self, exchange: &str, symbol: &str) -> Option<dashmap::mapref::one::Ref<String, OrderBook>> {
+    pub fn get(&self, exchange: &str, symbol: &str) -> Option<dashmap::mapref::one::Ref<'_, String, OrderBook>> {
         let key = Self::book_key(exchange, symbol);
         self.books.get(&key)
     }
@@ -271,7 +271,7 @@ impl OrderBookManager {
         self.books.iter().filter(|entry| entry.value().is_initialized()).count()
     }
 
-    pub fn iter(&self) -> dashmap::iter::Iter<String, OrderBook, std::collections::hash_map::RandomState> {
+    pub fn iter(&self) -> dashmap::iter::Iter<'_, String, OrderBook, std::collections::hash_map::RandomState> {
         self.books.iter()
     }
 }

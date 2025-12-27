@@ -24,7 +24,7 @@ export function useWebSocket() {
   // Computed: all books for selected symbol (from all enabled exchanges)
   const symbolBooks = computed(() => {
     const result: BookUpdate[] = []
-    for (const [key, bookUpdate] of Object.entries(books.value)) {
+    for (const bookUpdate of Object.values(books.value)) {
       if (bookUpdate.symbol === selectedSymbol.value && enabledExchanges.value.has(bookUpdate.exchange)) {
         result.push(bookUpdate)
       }

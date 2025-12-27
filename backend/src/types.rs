@@ -117,6 +117,7 @@ pub enum ClientMessage {
 }
 
 /// Binance depth snapshot response
+/// Used by benchmarks and exchanges/binance.rs
 #[derive(Debug, Deserialize)]
 pub struct BinanceDepthSnapshot {
     #[serde(rename = "lastUpdateId")]
@@ -126,6 +127,7 @@ pub struct BinanceDepthSnapshot {
 }
 
 /// Binance stream message for depth updates
+/// Used by benchmarks and exchanges/binance.rs
 #[derive(Debug, Deserialize)]
 pub struct BinanceDepthStream {
     pub stream: String,
@@ -133,6 +135,7 @@ pub struct BinanceDepthStream {
 }
 
 /// Binance stream message for trades
+/// Used by benchmarks and exchanges/binance.rs
 #[derive(Debug, Deserialize)]
 pub struct BinanceTradeStream {
     pub stream: String,

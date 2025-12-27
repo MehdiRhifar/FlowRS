@@ -3,6 +3,7 @@ import { useWebSocket } from './composables/useWebSocket'
 import OrderBook from './components/OrderBook.vue'
 import RecentTrades from './components/RecentTrades.vue'
 import MetricsPanel from './components/MetricsPanel.vue'
+import { EXCHANGE_COLORS } from './constants'
 
 const {
   symbolBooks,
@@ -15,13 +16,6 @@ const {
   enabledExchanges,
   toggleExchange
 } = useWebSocket()
-
-// Exchange colors
-const exchangeColors: Record<string, string> = {
-  'Binance': '#f0b90b',
-  'Bybit': '#f7a600',
-  'OKX': '#00c087',
-}
 </script>
 
 <template>
@@ -51,7 +45,11 @@ const exchangeColors: Record<string, string> = {
           :key="exchange"
           class="exchange-toggle-btn"
           :class="{ active: enabledExchanges.has(exchange) }"
-          :style="{ '--exchange-color': enabledExchanges.has(exchange) ? exchangeColors[exchange] : '#444' }"
+          :style="enabledExchanges.has(exchange) ? {
+            background: EXCHANGE_COLORS[exchange],
+            borderColor: EXCHANGE_COLORS[exchange],
+            color: '#000'
+          } : {}"
           @click="toggleExchange(exchange)"
         >
           {{ exchange }}
@@ -191,12 +189,6 @@ h1 {
 
 .exchange-toggle-btn:hover {
   border-color: #555;
-}
-
-.exchange-toggle-btn.active {
-  background: var(--exchange-color);
-  border-color: var(--exchange-color);
-  color: #000;
 }
 
 .header-right {

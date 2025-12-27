@@ -9,7 +9,7 @@ use sysinfo::System;
 use tokio::sync::RwLock;
 
 /// Number of latency samples to keep for percentile calculations
-const LATENCY_SAMPLE_SIZE: usize = 4096; // Power of 2 for fast modulo
+const LATENCY_SAMPLE_SIZE: usize = 8192; // Power of 2 for fast modulo
 
 /// Lock-free ring buffer for latency samples
 /// Uses atomic operations for writing, only needs lock for reading percentiles

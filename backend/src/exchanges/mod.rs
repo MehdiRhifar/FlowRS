@@ -52,6 +52,7 @@ pub enum MarketMessage {
     /// Individual trade
     Trade(Trade),
     /// Exchange-specific message (for debugging)
+    #[allow(dead_code)]
     Raw(String),
 }
 

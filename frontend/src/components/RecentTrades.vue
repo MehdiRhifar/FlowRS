@@ -1,17 +1,11 @@
 <script setup lang="ts">
 import type { Trade } from '../types'
+import { getExchangeColor } from '../constants'
 
 defineProps<{
   trades: Trade[]
   symbol?: string
 }>()
-
-// Exchange colors
-const exchangeColors: Record<string, string> = {
-  'Binance': '#f0b90b',
-  'Bybit': '#f7a600',
-  'OKX': '#00c087',
-}
 
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp)
@@ -32,10 +26,6 @@ function formatPrice(price: string): string {
 
 function formatQuantity(qty: string): string {
   return parseFloat(qty).toFixed(4)
-}
-
-function getExchangeColor(exchange: string): string {
-  return exchangeColors[exchange] || '#888'
 }
 </script>
 
