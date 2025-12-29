@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { Metrics } from '../types'
+import {computed} from 'vue'
+import type {Metrics} from '../types'
 
 const props = defineProps<{
   metrics: Metrics | null
   connected: boolean
-  selectedSymbol?: string
 }>()
 
 const uptime = computed(() => {
@@ -14,7 +13,7 @@ const uptime = computed(() => {
   const hours = Math.floor(seconds / 3600)
   const minutes = Math.floor((seconds % 3600) / 60)
   const secs = seconds % 60
-  
+
   if (hours > 0) {
     return `${hours}h ${minutes}m ${secs}s`
   } else if (minutes > 0) {
@@ -34,17 +33,12 @@ const formatLatency = (us: number): string => {
   if (us < 1000) return `${us.toFixed(0)}µs`
   return `${(us / 1000).toFixed(2)}ms`
 }
-
-const symbolMetrics = computed(() => {
-  if (!props.metrics || !props.selectedSymbol) return null
-  return props.metrics.symbols[props.selectedSymbol] || null
-})
 </script>
 
 <template>
   <div class="metrics">
     <h2>Performance Metrics</h2>
-    
+
     <div class="status" :class="{ connected }">
       <span class="dot"></span>
       {{ connected ? 'Connected' : 'Disconnected' }}
@@ -53,7 +47,7 @@ const symbolMetrics = computed(() => {
     <div v-if="!metrics" class="loading">
       Waiting for metrics...
     </div>
-    
+
     <div v-else class="metrics-content">
       <!-- Global Stats -->
       <div class="section">
@@ -62,14 +56,6 @@ const symbolMetrics = computed(() => {
           <div class="metric">
             <span class="label">Messages/sec</span>
             <span class="value highlight">{{ metrics.messages_per_second.toLocaleString() }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Updates/sec</span>
-            <span class="value">{{ metrics.updates_per_second.toLocaleString() }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Trades/sec</span>
-            <span class="value">{{ metrics.trades_per_second.toLocaleString() }}</span>
           </div>
           <div class="metric">
             <span class="label">Bandwidth</span>
@@ -98,14 +84,6 @@ const symbolMetrics = computed(() => {
             <span class="label">P99</span>
             <span class="value highlight-warn">{{ formatLatency(metrics.latency_p99_us) }}</span>
           </div>
-          <div class="metric">
-            <span class="label">Min</span>
-            <span class="value dim">{{ formatLatency(metrics.latency_min_us) }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Max</span>
-            <span class="value dim">{{ formatLatency(metrics.latency_max_us) }}</span>
-          </div>
         </div>
       </div>
 
@@ -116,14 +94,6 @@ const symbolMetrics = computed(() => {
           <div class="metric">
             <span class="label">Messages</span>
             <span class="value">{{ metrics.total_messages.toLocaleString() }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Updates</span>
-            <span class="value">{{ metrics.total_updates.toLocaleString() }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Trades</span>
-            <span class="value">{{ metrics.total_trades.toLocaleString() }}</span>
           </div>
           <div class="metric">
             <span class="label">Data</span>
@@ -145,43 +115,12 @@ const symbolMetrics = computed(() => {
             <span class="value">{{ metrics.memory_used_mb.toFixed(1) }} MB</span>
           </div>
           <div class="metric">
-            <span class="label">CPU</span>
-            <span class="value">{{ metrics.cpu_usage_percent.toFixed(1) }}%</span>
-          </div>
-          <div class="metric">
-            <span class="label">Symbols</span>
-            <span class="value">{{ metrics.active_symbols }}</span>
-          </div>
-          <div class="metric">
             <span class="label">Clients</span>
             <span class="value">{{ metrics.active_connections }}</span>
           </div>
           <div class="metric">
             <span class="label">Reconnects</span>
             <span class="value">{{ metrics.websocket_reconnects }}</span>
-          </div>
-        </div>
-      </div>
-
-      <!-- Selected Symbol Stats -->
-      <div v-if="symbolMetrics" class="section symbol-section">
-        <h3>{{ selectedSymbol }}</h3>
-        <div class="metrics-grid">
-          <div class="metric">
-            <span class="label">Msg/sec</span>
-            <span class="value">{{ symbolMetrics.messages_per_second }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Trades/sec</span>
-            <span class="value">{{ symbolMetrics.trades_per_second }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Latency</span>
-            <span class="value">{{ formatLatency(symbolMetrics.latency_avg_us) }}</span>
-          </div>
-          <div class="metric">
-            <span class="label">Spread</span>
-            <span class="value">{{ symbolMetrics.spread_bps?.toFixed(2) || '--' }} bps</span>
           </div>
         </div>
       </div>
@@ -235,8 +174,12 @@ h3 {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 .loading {
@@ -258,14 +201,6 @@ h3 {
 .section:last-child {
   border-bottom: none;
   padding-bottom: 0;
-}
-
-.symbol-section {
-  background: #252538;
-  margin: 0 -8px;
-  padding: 12px 8px;
-  border-radius: 6px;
-  border-bottom: none;
 }
 
 .metrics-grid {

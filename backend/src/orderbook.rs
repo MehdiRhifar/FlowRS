@@ -1,160 +1,236 @@
-use crate::types::{PriceLevel, ClientMessage, TRADING_PAIRS, ORDERBOOK_DEPTH};
+use crate::types::{ClientMessage, PriceLevel, ORDERBOOK_DEPTH, TRADING_PAIRS};
 use dashmap::DashMap;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// Thread-safe order book structure for a single symbol
+// Facteurs de précision pour conversion Decimal -> u64
+// 8 décimales de précision (suffisant pour crypto)
+pub const PRICE_FACTOR: u64 = 100_000_000; // 10^8
+pub const QTY_FACTOR: u64 = 100_000_000; // 10^8
+
+/// Structure optimisée pour le cache CPU (16 bytes exactement)
+#[derive(Debug, Clone, Copy)]
+pub struct Level {
+    pub price: u64, // Prix * PRICE_FACTOR
+    pub qty: u64,   // Quantité * QTY_FACTOR
+}
+
 #[derive(Debug)]
 pub struct OrderBook {
-    /// Symbol this book represents
     symbol: String,
-    /// Exchange this book is from
     exchange: String,
-    /// Bids (buy orders) - price -> quantity
-    /// BTreeMap is sorted ascending, so we iterate in reverse for highest price first
-    bids: BTreeMap<Decimal, Decimal>,
-    /// Asks (sell orders) - price -> quantity
-    /// BTreeMap is sorted ascending, lowest price first
-    asks: BTreeMap<Decimal, Decimal>,
-    /// Last update ID from exchange (for synchronization)
+    /// Bids: Trié DESC (Plus haut prix en premier) -> [100, 99, 98]
+    bids: Vec<Level>,
+    /// Asks: Trié ASC (Plus bas prix en premier) -> [101, 102, 103]
+    asks: Vec<Level>,
     last_update_id: u64,
-    /// Whether the book has been initialized with snapshot
     initialized: bool,
+    max_depth: usize,
 }
 
 impl OrderBook {
     pub fn new(symbol: &str, exchange: &str) -> Self {
+        // On pré-alloue un peu plus que la profondeur max pour éviter les réallocs lors des inserts
+        let capacity = ORDERBOOK_DEPTH + 10;
         Self {
             symbol: symbol.to_string(),
             exchange: exchange.to_string(),
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
+            bids: Vec::with_capacity(capacity),
+            asks: Vec::with_capacity(capacity),
             last_update_id: 0,
             initialized: false,
+            max_depth: ORDERBOOK_DEPTH,
         }
     }
 
-    /// Initialize from REST API snapshot
+    /// Helper pour convertir u64 interne -> Decimal externe (prix)
+    #[inline(always)]
+    fn to_external_price(price: u64) -> Decimal {
+        Decimal::from(price) / Decimal::from(PRICE_FACTOR)
+    }
+
+    /// Helper pour convertir u64 interne -> Decimal externe (quantité)
+    #[inline(always)]
+    fn to_external_qty(qty: u64) -> Decimal {
+        Decimal::from(qty) / Decimal::from(QTY_FACTOR)
+    }
+
     pub fn initialize_from_snapshot(
         &mut self,
-        bids: Vec<(String, String)>,
-        asks: Vec<(String, String)>,
+        bids: Vec<(u64, u64)>,
+        asks: Vec<(u64, u64)>,
         last_update_id: u64,
     ) {
         self.bids.clear();
         self.asks.clear();
 
-        for (price_str, qty_str) in bids {
-            if let (Ok(price), Ok(qty)) = (price_str.parse(), qty_str.parse()) {
-                if qty > dec!(0) {
-                    self.bids.insert(price, qty);
-                }
+        // Remplissage optimisé - données déjà en u64
+        for (price, qty) in bids {
+            if qty > 0 {
+                self.bids.push(Level { price, qty });
+            }
+        }
+        for (price, qty) in asks {
+            if qty > 0 {
+                self.asks.push(Level { price, qty });
             }
         }
 
-        for (price_str, qty_str) in asks {
-            if let (Ok(price), Ok(qty)) = (price_str.parse(), qty_str.parse()) {
-                if qty > dec!(0) {
-                    self.asks.insert(price, qty);
-                }
-            }
-        }
+        // Tri initial (Vital pour que le binary_search fonctionne après)
+        // Bids: Descendant (b.cmp(a))
+        self.bids.sort_unstable_by(|a, b| b.price.cmp(&a.price));
+        // Asks: Ascendant (a.cmp(b))
+        self.asks.sort_unstable_by(|a, b| a.price.cmp(&b.price));
+
+        // Trim immédiat
+        self.truncate_books();
 
         self.last_update_id = last_update_id;
         self.initialized = true;
     }
 
-    /// Check if the book is ready to receive updates
-    pub fn is_initialized(&self) -> bool {
-        self.initialized
-    }
-
-    /// Get last update ID
-    #[allow(dead_code)]
-    pub fn last_update_id(&self) -> u64 {
-        self.last_update_id
-    }
-
-    /// Apply a depth update from WebSocket
-    /// Returns true if update was applied (book changed)
-    /// Auto-trims when size exceeds 10x threshold (amortized cost)
+    /// Application optimisée des updates WebSocket
     pub fn apply_update(
         &mut self,
-        bids: Vec<(String, String)>,
-        asks: Vec<(String, String)>,
+        bids: Vec<(u64, u64)>,
+        asks: Vec<(u64, u64)>,
         _first_update_id: u64,
         final_update_id: u64,
     ) -> bool {
         let mut changed = false;
 
-        for (price_str, qty_str) in bids {
-            if let (Ok(price), Ok(qty)) = (price_str.parse(), qty_str.parse()) {
-                if qty == dec!(0) {
-                    if self.bids.remove(&price).is_some() {
+        // --- GESTION DES BIDS (Tri DESC) ---
+        for (p_int, q_int) in bids {
+            // Bids sont triés DESC, donc on inverse la comparaison pour binary_search
+            // On cherche où 'p_int' se trouve par rapport aux éléments existants
+            let idx_res = self
+                .bids
+                .binary_search_by(|level| level.price.cmp(&p_int).reverse());
+
+            match idx_res {
+                Ok(idx) => {
+                    // Prix trouvé
+                    if q_int == 0 {
+                        self.bids.remove(idx);
                         changed = true;
+                    } else {
+                        // Update quantité
+                        if self.bids[idx].qty != q_int {
+                            self.bids[idx].qty = q_int;
+                            changed = true;
+                        }
                     }
-                } else if self.bids.insert(price, qty) != Some(qty) {
-                    changed = true;
+                }
+                Err(idx) => {
+                    // Prix non trouvé, 'idx' est la position d'insertion
+                    if q_int > 0 {
+                        // Optimisation: ne pas insérer si c'est au-delà de la profondeur max
+                        if idx < self.max_depth {
+                            self.bids.insert(
+                                idx,
+                                Level {
+                                    price: p_int,
+                                    qty: q_int,
+                                },
+                            );
+                            changed = true;
+                            // Si on dépasse, on retire le dernier (le moins bon bid)
+                            if self.bids.len() > self.max_depth {
+                                self.bids.pop();
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        for (price_str, qty_str) in asks {
-            if let (Ok(price), Ok(qty)) = (price_str.parse(), qty_str.parse()) {
-                if qty == dec!(0) {
-                    if self.asks.remove(&price).is_some() {
+        // --- GESTION DES ASKS (Tri ASC) ---
+        for (p_int, q_int) in asks {
+            // Asks sont triés ASC, comparaison standard
+            let idx_res = self.asks.binary_search_by(|level| level.price.cmp(&p_int));
+
+            match idx_res {
+                Ok(idx) => {
+                    if q_int == 0 {
+                        self.asks.remove(idx);
                         changed = true;
+                    } else {
+                        if self.asks[idx].qty != q_int {
+                            self.asks[idx].qty = q_int;
+                            changed = true;
+                        }
                     }
-                } else if self.asks.insert(price, qty) != Some(qty) {
-                    changed = true;
+                }
+                Err(idx) => {
+                    if q_int > 0 {
+                        if idx < self.max_depth {
+                            self.asks.insert(
+                                idx,
+                                Level {
+                                    price: p_int,
+                                    qty: q_int,
+                                },
+                            );
+                            changed = true;
+                            if self.asks.len() > self.max_depth {
+                                self.asks.pop();
+                            }
+                        }
+                    }
                 }
             }
         }
 
-
-        self.auto_trim(ORDERBOOK_DEPTH);
         self.last_update_id = final_update_id;
         changed
     }
 
-    /// Get the best bid price (highest)
+    /// Garde la taille fixe (redondance de sécurité)
+    fn truncate_books(&mut self) {
+        if self.bids.len() > self.max_depth {
+            self.bids.truncate(self.max_depth);
+        }
+        if self.asks.len() > self.max_depth {
+            self.asks.truncate(self.max_depth);
+        }
+    }
+
     pub fn best_bid(&self) -> Option<Decimal> {
-        self.bids.last_key_value().map(|(price, _)| *price)
+        self.bids.first().map(|l| Self::to_external_price(l.price))
     }
 
-    /// Get the best ask price (lowest)
     pub fn best_ask(&self) -> Option<Decimal> {
-        self.asks.first_key_value().map(|(price, _)| *price)
+        self.asks.first().map(|l| Self::to_external_price(l.price))
     }
 
-    /// Trim the book to keep only the best N levels on each side
-    /// This prevents accumulation of stale price levels
-    /// Optimization: Only trim when size exceeds threshold to reduce allocations
-    /// split_off is efficient as it's a native BTreeMap operation
-    pub fn auto_trim(&mut self, max_levels: usize) {
-        const TRIM_THRESHOLD_MULT: usize = 3;
-        let threshold = max_levels * TRIM_THRESHOLD_MULT;
+    // ... Le reste (spread, to_client_message) doit juste être adapté pour convertir
+    // les u64/f64 internes en Decimal/PriceLevel externes.
 
-        // For bids: keep the highest prices (at the end of BTreeMap)
-        // split_off returns everything >= key, we want to keep that part
-        if self.bids.len() > threshold {
-            if let Some(cutoff) = self.bids.keys().nth_back(max_levels - 1).copied() {
-                self.bids = self.bids.split_off(&cutoff);
-            }
-        }
+    pub fn get_top_levels(&self, n: usize) -> (Vec<PriceLevel>, Vec<PriceLevel>) {
+        let bids: Vec<PriceLevel> = self
+            .bids
+            .iter()
+            .take(n)
+            .map(|l| PriceLevel {
+                price: Self::to_external_price(l.price),
+                quantity: Self::to_external_qty(l.qty),
+            })
+            .collect();
 
-        // For asks: keep the lowest prices (at the beginning of BTreeMap)
-        // split_off returns everything >= key, we want to discard that part
-        if self.asks.len() > threshold {
-            if let Some(cutoff) = self.asks.keys().nth(max_levels).copied() {
-                self.asks.split_off(&cutoff);
-            }
-        }
+        let asks: Vec<PriceLevel> = self
+            .asks
+            .iter()
+            .take(n)
+            .map(|l| PriceLevel {
+                price: Self::to_external_price(l.price),
+                quantity: Self::to_external_qty(l.qty),
+            })
+            .collect();
+
+        (bids, asks)
     }
 
-    /// Calculate the spread
     pub fn spread(&self) -> Option<(Decimal, Decimal)> {
         match (self.best_bid(), self.best_ask()) {
             (Some(bid), Some(ask)) => {
@@ -171,43 +247,6 @@ impl OrderBook {
         }
     }
 
-    /// Calculate total bid depth (sum of all bid quantities)
-    pub fn bid_depth(&self) -> Decimal {
-        self.bids.values().sum()
-    }
-
-    /// Calculate total ask depth (sum of all ask quantities)
-    pub fn ask_depth(&self) -> Decimal {
-        self.asks.values().sum()
-    }
-
-    /// Get top N levels for display
-    pub fn get_top_levels(&self, n: usize) -> (Vec<PriceLevel>, Vec<PriceLevel>) {
-        let bids: Vec<PriceLevel> = self
-            .bids
-            .iter()
-            .rev() // Reverse to get highest prices first
-            .take(n)
-            .map(|(price, qty)| PriceLevel {
-                price: *price,
-                quantity: *qty,
-            })
-            .collect();
-
-        let asks: Vec<PriceLevel> = self
-            .asks
-            .iter()
-            .take(n) // Lowest prices first
-            .map(|(price, qty)| PriceLevel {
-                price: *price,
-                quantity: *qty,
-            })
-            .collect();
-
-        (bids, asks)
-    }
-
-    /// Create a client message with current book state
     pub fn to_client_message(&self, levels: usize) -> ClientMessage {
         let (bids, asks) = self.get_top_levels(levels);
         let (spread, spread_percent) = self.spread().unwrap_or((dec!(0), dec!(0)));
@@ -219,11 +258,19 @@ impl OrderBook {
             asks,
             spread,
             spread_percent,
-            bid_depth: self.bid_depth(),
-            ask_depth: self.ask_depth(),
         }
     }
+
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    pub fn last_update_id(&self) -> u64 {
+        self.last_update_id
+    }
 }
+
+// OrderBookManager reste identique car il utilise juste OrderBook comme une boîte noire.
 
 /// Multi-symbol order book manager
 #[derive(Debug)]
@@ -234,8 +281,15 @@ pub struct OrderBookManager {
 
 impl OrderBookManager {
     /// Create a composite key from exchange and symbol
+    /// Uses a pre-sized buffer to avoid reallocation
+    #[inline(always)]
     fn book_key(exchange: &str, symbol: &str) -> String {
-        format!("{}:{}", exchange, symbol)
+        // Pre-allocate exact size needed: exchange + ":" + symbol
+        let mut key = String::with_capacity(exchange.len() + 1 + symbol.len());
+        key.push_str(exchange);
+        key.push(':');
+        key.push_str(symbol);
+        key
     }
 
     pub fn with_symbols(_symbols: &[&str]) -> Self {
@@ -246,19 +300,29 @@ impl OrderBookManager {
     }
 
     /// Get or create an order book for the given exchange and symbol
-    pub fn get_or_create(&self, exchange: &str, symbol: &str) -> dashmap::mapref::one::RefMut<'_, String, OrderBook> {
+    pub fn get_or_create(
+        &self,
+        exchange: &str,
+        symbol: &str,
+    ) -> dashmap::mapref::one::RefMut<'_, String, OrderBook> {
         let key = Self::book_key(exchange, symbol);
         self.books
             .entry(key)
             .or_insert_with(|| OrderBook::new(symbol, exchange))
     }
 
-    pub fn get(&self, exchange: &str, symbol: &str) -> Option<dashmap::mapref::one::Ref<'_, String, OrderBook>> {
+    pub fn get(
+        &self,
+        exchange: &str,
+        symbol: &str,
+    ) -> Option<dashmap::mapref::one::Ref<'_, String, OrderBook>> {
         let key = Self::book_key(exchange, symbol);
         self.books.get(&key)
     }
 
-    pub fn iter(&self) -> dashmap::iter::Iter<'_, String, OrderBook, std::collections::hash_map::RandomState> {
+    pub fn iter(
+        &self,
+    ) -> dashmap::iter::Iter<'_, String, OrderBook, std::collections::hash_map::RandomState> {
         self.books.iter()
     }
 }

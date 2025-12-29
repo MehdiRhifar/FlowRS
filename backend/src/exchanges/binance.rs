@@ -1,8 +1,7 @@
+use super::utils::{fast_parse_u64, fast_parse_u64_inner};
 /// Binance Futures exchange connector
-
 use super::{DepthSnapshot, Exchange, MarketMessage};
 use crate::types::{Trade, TradeSide};
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::error::Error;
 
@@ -35,28 +34,29 @@ impl BinanceConnector {
         let is_depth = raw.as_bytes().windows(6).any(|w| w == b"@depth");
 
         if is_depth {
-            let msg: BinanceDepthStream = serde_json::from_str(raw)
-                .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+            let msg: BinanceDepthStream =
+                serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
             let symbol = msg.data.symbol.clone();
 
-            let bids: Vec<(Decimal, Decimal)> = msg
+            // Use fast_parse_u64_inner to avoid Box allocation on hot path
+            let bids: Vec<(u64, u64)> = msg
                 .data
                 .bids
                 .iter()
                 .filter_map(|(p, q)| {
-                    let price = p.parse().ok()?;
-                    let qty = q.parse().ok()?;
+                    let price = fast_parse_u64_inner(p)?;
+                    let qty = fast_parse_u64_inner(q)?;
                     Some((price, qty))
                 })
                 .collect();
 
-            let asks: Vec<(Decimal, Decimal)> = msg
+            let asks: Vec<(u64, u64)> = msg
                 .data
                 .asks
                 .iter()
                 .filter_map(|(p, q)| {
-                    let price = p.parse().ok()?;
-                    let qty = q.parse().ok()?;
+                    let price = fast_parse_u64_inner(p)?;
+                    let qty = fast_parse_u64_inner(q)?;
                     Some((price, qty))
                 })
                 .collect();
@@ -70,21 +70,24 @@ impl BinanceConnector {
                 is_snapshot: false, // Binance always sends deltas
             }))
         } else {
-            let msg: BinanceTradeStream = serde_json::from_str(raw)
-                .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+            let msg: BinanceTradeStream =
+                serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+
+            // Use fast_parse_u64_inner for zero-allocation parsing
+            let price = match fast_parse_u64_inner(&msg.data.price) {
+                Some(p) => p,
+                None => return Ok(None), // Skip malformed trade
+            };
+            let quantity = match fast_parse_u64_inner(&msg.data.qty) {
+                Some(q) => q,
+                None => return Ok(None),
+            };
+
             let trade = Trade {
                 exchange: "Binance".to_string(),
                 symbol: msg.data.symbol.clone(),
-                price: msg
-                    .data
-                    .price
-                    .parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?,
-                quantity: msg
-                    .data
-                    .qty
-                    .parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?,
+                price,
+                quantity,
                 side: if msg.data.is_buyer_maker {
                     TradeSide::Sell
                 } else {
@@ -173,6 +176,23 @@ struct BinanceAggTrade {
 struct BinanceDepthResponse {
     #[serde(rename = "lastUpdateId")]
     last_update_id: u64,
-    bids: Vec<(String, String)>,
-    asks: Vec<(String, String)>,
+    #[serde(deserialize_with = "deserialize_price_levels")]
+    bids: Vec<(u64, u64)>,
+    #[serde(deserialize_with = "deserialize_price_levels")]
+    asks: Vec<(u64, u64)>,
+}
+
+fn deserialize_price_levels<'de, D>(deserializer: D) -> Result<Vec<(u64, u64)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let raw: Vec<(String, String)> = Vec::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(p, q)| {
+            let price = fast_parse_u64(&p).map_err(D::Error::custom)?;
+            let qty = fast_parse_u64(&q).map_err(D::Error::custom)?;
+            Ok((price, qty))
+        })
+        .collect()
 }

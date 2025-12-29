@@ -1,22 +1,21 @@
 /// Multi-exchange connector support
-
 pub mod binance;
 pub mod bybit;
 pub mod coinbase;
 pub mod kraken;
 pub mod manager;
+pub mod utils;
 
-use rust_decimal::Decimal;
 use std::error::Error;
 
 use crate::types::Trade;
 
 // Re-export main types
-pub use manager::ExchangeManager;
 pub use binance::BinanceConnector as BinanceConn;
 pub use bybit::BybitConnector as BybitConn;
 pub use coinbase::CoinbaseConnector as CoinbaseConn;
 pub use kraken::KrakenConnector as KrakenConn;
+pub use manager::ExchangeManager;
 
 /// Exchange identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,7 +35,6 @@ impl Exchange {
             Exchange::Kraken => "Kraken",
         }
     }
-
 }
 
 /// Normalized market data message from any exchange
@@ -46,8 +44,8 @@ pub enum MarketMessage {
     DepthUpdate {
         exchange: Exchange,
         symbol: String,
-        bids: Vec<(Decimal, Decimal)>,
-        asks: Vec<(Decimal, Decimal)>,
+        bids: Vec<(u64, u64)>, // (price, qty) scaled by 1e8
+        asks: Vec<(u64, u64)>, // (price, qty) scaled by 1e8
         update_id: u64,
         is_snapshot: bool, // true for full snapshot, false for delta update
     },
@@ -138,8 +136,8 @@ impl ExchangeConnector {
 /// Order book snapshot from REST API
 #[derive(Debug, Clone)]
 pub struct DepthSnapshot {
-    pub bids: Vec<(String, String)>,
-    pub asks: Vec<(String, String)>,
+    pub bids: Vec<(u64, u64)>, // (price, qty) scaled by 1e8
+    pub asks: Vec<(u64, u64)>, // (price, qty) scaled by 1e8
     pub last_update_id: u64,
 }
 

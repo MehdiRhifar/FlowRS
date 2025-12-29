@@ -1,14 +1,14 @@
 /// Manages WebSocket connections to multiple exchanges with auto-reconnect
-
 use super::{ExchangeConnector, MarketMessage};
 use crate::metrics::SharedMetrics;
 use crate::orderbook::SharedOrderBookManager;
-use crate::types::{ClientMessage, ORDERBOOK_DISPLAY_DEPTH};
+use crate::types::ClientMessage;
 use futures_util::{SinkExt, StreamExt};
 use std::error::Error;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
+
 
 /// Multi-Exchange Manager
 ///
@@ -161,11 +161,7 @@ impl ExchangeManager {
         for symbol in symbols {
             match connector.fetch_snapshot(symbol, 10).await {
                 Ok(Some(snapshot)) => {
-                    tracing::debug!(
-                        "[{}] REST snapshot for {}",
-                        exchange_name,
-                        symbol
-                    );
+                    tracing::debug!("[{}] REST snapshot for {}", exchange_name, symbol);
                     let mut book = orderbook_manager.get_or_create(exchange_name, symbol);
                     book.initialize_from_snapshot(
                         snapshot.bids,
@@ -176,11 +172,7 @@ impl ExchangeManager {
                 }
                 Ok(None) => {
                     // Exchange uses WebSocket snapshots - skip REST fetch
-                    tracing::debug!(
-                        "[{}] {} uses WebSocket snapshots",
-                        exchange_name,
-                        symbol
-                    );
+                    tracing::debug!("[{}] {} uses WebSocket snapshots", exchange_name, symbol);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -247,10 +239,19 @@ impl ExchangeManager {
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         let sub_messages = connector.get_subscription_messages(symbols);
         if !sub_messages.is_empty() {
-            tracing::info!("[{}] Sending {} subscription message(s)...", exchange_name, sub_messages.len());
+            tracing::info!(
+                "[{}] Sending {} subscription message(s)...",
+                exchange_name,
+                sub_messages.len()
+            );
 
             for (i, sub_msg) in sub_messages.iter().enumerate() {
-                tracing::debug!("[{}] Sending subscription #{}: {}", exchange_name, i + 1, sub_msg);
+                tracing::debug!(
+                    "[{}] Sending subscription #{}: {}",
+                    exchange_name,
+                    i + 1,
+                    sub_msg
+                );
                 exchange_ws_write
                     .send(WsMessage::Text(sub_msg.clone().into()))
                     .await?;
@@ -323,17 +324,15 @@ impl ExchangeManager {
         // Parse message via connector
         match connector.parse_message(text) {
             Ok(Some(market_msg)) => {
-                // Record message with symbol
-                let symbol = match &market_msg {
-                    MarketMessage::DepthUpdate { symbol, .. } => symbol.clone(),
-                    MarketMessage::Trade(trade) => trade.symbol.clone(),
-                    MarketMessage::Raw(_) => String::new(),
-                };
-                Self::process_market_message(market_msg, client_broadcast_tx, orderbook_manager, metrics).await;
+                // Check if it's a relevant message (not Raw) before processing
+                let is_relevant = !matches!(&market_msg, MarketMessage::Raw(_));
 
-                metrics.record_latency(&symbol, start);
-                if !symbol.is_empty() {
-                    metrics.record_nb_message(&symbol);
+                Self::process_market_message(market_msg, client_broadcast_tx, orderbook_manager)
+                    .await;
+
+                metrics.record_latency(start);
+                if is_relevant {
+                    metrics.record_message();
                 }
             }
             Ok(None) => {
@@ -350,7 +349,6 @@ impl ExchangeManager {
         msg: MarketMessage,
         client_broadcast_tx: &broadcast::Sender<ClientMessage>,
         orderbook_manager: &SharedOrderBookManager,
-        metrics: &SharedMetrics,
     ) {
         match msg {
             MarketMessage::DepthUpdate {
@@ -363,39 +361,18 @@ impl ExchangeManager {
             } => {
                 let exchange_name = exchange.name();
 
-                let bids_str: Vec<(String, String)> = bids
-                    .iter()
-                    .map(|(p, q)| (p.to_string(), q.to_string()))
-                    .collect();
+                let mut book = orderbook_manager.get_or_create(exchange_name, &symbol);
 
-                let asks_str: Vec<(String, String)> = asks
-                    .iter()
-                    .map(|(p, q)| (p.to_string(), q.to_string()))
-                    .collect();
-
-                let changed = {
-                    let mut book = orderbook_manager.get_or_create(exchange_name, &symbol);
-
-                    if is_snapshot {
-                        book.initialize_from_snapshot(bids_str, asks_str, update_id);
-                        tracing::debug!("[{}] Snapshot received for {}", exchange_name, symbol);
-                        true
-                    } else {
-                        book.apply_update(bids_str, asks_str, 0, update_id)
-                    }
-                };
-
-                if changed {
-                    metrics.record_nb_update();
-
-                    if let Some(book_ref) = orderbook_manager.get(exchange_name, &symbol) {
-                        let client_msg = book_ref.value().to_client_message(ORDERBOOK_DISPLAY_DEPTH);
-                        let _ = client_broadcast_tx.send(client_msg);
-                    }
+                if is_snapshot {
+                    book.initialize_from_snapshot(bids, asks, update_id);
+                    tracing::debug!("[{}] Snapshot received for {}", exchange_name, symbol);
+                    // No broadcast - server will poll orderbook state
+                } else {
+                    book.apply_update(bids, asks, 0, update_id);
+                    // No broadcast - server will poll orderbook state
                 }
             }
             MarketMessage::Trade(trade) => {
-                metrics.record_trade_for_symbol(&trade.symbol);
                 let _ = client_broadcast_tx.send(ClientMessage::Trade(trade));
             }
             MarketMessage::Raw(_) => {

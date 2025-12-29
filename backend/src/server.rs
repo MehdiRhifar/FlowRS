@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tokio::time::{interval, Duration};
 use tokio_tungstenite::tungstenite::Message;
 
-const UPDATE_THROTTLE_MS: u64 = 1000;
+const BOOK_POLL_MS: u64 = 200;
 
 /// Start the WebSocket server for frontend clients
 pub async fn start_server(
@@ -78,40 +78,69 @@ async fn handle_client(
         }
     }
 
-    let current_metrics = metrics.compute_metrics(Some(&orderbook_manager)).await;
+    let current_metrics = metrics.compute_metrics();
     let client_msg = ClientMessage::Metrics(current_metrics);
     let json = serde_json::to_string(&client_msg)?;
     client_ws_write.send(Message::Text(json.into())).await?;
 
-    // Throttle book updates to avoid overwhelming clients
-    let mut pending_book_updates: HashMap<String, ClientMessage> = HashMap::new();
-    let mut throttle_ticker = interval(Duration::from_millis(UPDATE_THROTTLE_MS));
-    throttle_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Track last sent update_id per orderbook to avoid redundant sends
+    let mut last_sent_update_id: HashMap<String, u64> = HashMap::new();
+
+    // Poll orderbooks periodically and send only if changed
+    let mut book_poll_ticker = interval(Duration::from_millis(BOOK_POLL_MS));
+    book_poll_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut messages_buffer = Vec::with_capacity(TRADING_PAIRS.len());
     loop {
         tokio::select! {
-            // Send pending updates periodically (throttling)
-            _ = throttle_ticker.tick() => {
-                if !pending_book_updates.is_empty() {
-                    for (_key, client_msg) in pending_book_updates.drain() {
-                        if let Ok(json) = serde_json::to_string(&client_msg) {
-                            if let Err(e) = client_ws_write.send(Message::Text(json.into())).await {
-                                tracing::debug!("Failed to send throttled update to client {}: {}", client_addr, e);
-                                break;
-                            }
+            // Poll orderbooks and send updates if changed
+            _ = book_poll_ticker.tick() => {
+                messages_buffer.clear();
+                for entry in orderbook_manager.iter() {
+                    let book = entry.value();
+
+                    if !book.is_initialized() {
+                        continue;
+                    }
+
+                    let key = entry.key().clone();
+                    let current_update_id = book.last_update_id();
+
+                    // Check if this orderbook has been updated since last send
+                    let should_send = match last_sent_update_id.get(&key) {
+                        Some(&last_id) => current_update_id != last_id,
+                        None => true, // First time seeing this book
+                    };
+
+                    if should_send {
+                        // On construit le message (copie mémoire)
+                        let client_msg = book.to_client_message(ORDERBOOK_DISPLAY_DEPTH);
+
+                        // On stocke le message et la clé pour mettre à jour l'ID après
+                        messages_buffer.push((key, current_update_id, client_msg));
+                    }
+                }
+                // PHASE 2: Envoi Réseau (Lent, Async, sans verrou)
+                for (key, update_id, client_msg) in messages_buffer.drain(..) {
+                    if let Ok(json) = serde_json::to_string(&client_msg) {
+                        if let Err(e) = client_ws_write.send(Message::Text(json.into())).await {
+                            tracing::debug!("Failed to send book update to client {}: {}", client_addr, e);
+                            // Si le client est déconnecté, on arrête tout
+                            return Ok(());
                         }
+                        // On ne met à jour l'ID que si l'envoi a réussi
+                        last_sent_update_id.insert(key, update_id);
                     }
                 }
             }
 
-            // Receive updates from broadcast channel
+            // Receive updates from broadcast channel (Trades and Metrics only)
             broadcast_result = client_broadcast_rx.recv() => {
                 match broadcast_result {
                     Ok(client_msg) => {
                         match &client_msg {
-                            ClientMessage::BookUpdate { exchange, symbol, .. } => {
-                                // Throttle orderbook updates (keep only latest per exchange:symbol)
-                                let key = format!("{}:{}", exchange, symbol);
-                                pending_book_updates.insert(key, client_msg);
+                            ClientMessage::BookUpdate { .. } => {
+                                // BookUpdates are no longer sent via broadcast - ignore
                             }
                             _ => {
                                 // Send trades and metrics immediately (no throttling)
@@ -123,17 +152,8 @@ async fn handle_client(
                             }
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("Client {} lagged by {} messages, sending full snapshot", client_addr, n);
-                        // Client fell behind - send current state for all symbols to catch up
-                        for entry in orderbook_manager.iter() {
-                            let book = entry.value();
-                            if book.is_initialized() {
-                                let client_msg = book.to_client_message(ORDERBOOK_DISPLAY_DEPTH);
-                                let json = serde_json::to_string(&client_msg)?;
-                                let _ = client_ws_write.send(Message::Text(json.into())).await;
-                            }
-                        }
+                    Err(broadcast::error::RecvError::Lagged(_n)) => {
+                        // Client lagged on Trades/Metrics - not critical, just skip
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         tracing::info!("Broadcast channel closed");

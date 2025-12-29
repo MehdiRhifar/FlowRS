@@ -1,9 +1,9 @@
+use futures_util::StreamExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use futures_util::StreamExt;
 
 /// Configuration pour les tests de charge
 struct LoadTestConfig {
@@ -243,7 +243,10 @@ async fn test_load_multiple_clients() {
     let results = run_load_test(config).await;
     println!("{}", results.report());
 
-    assert!(results.messages_received > 100, "Should receive many messages");
+    assert!(
+        results.messages_received > 100,
+        "Should receive many messages"
+    );
     assert!(
         results.messages_per_second > 10.0,
         "Should maintain good throughput"
@@ -309,7 +312,10 @@ async fn main() {
     // Rapport final
     println!("\n\n📈 FINAL SUMMARY");
     println!("═══════════════════════════════════════\n");
-    println!("{:<10} {:<10} {:<15} {:<10}", "Test", "Clients", "Messages", "Msg/sec");
+    println!(
+        "{:<10} {:<10} {:<15} {:<10}",
+        "Test", "Clients", "Messages", "Msg/sec"
+    );
     println!("───────────────────────────────────────");
 
     for (name, result) in &all_results {

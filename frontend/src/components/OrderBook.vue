@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { BookUpdate } from '../types'
-import { getExchangeColor } from '../constants'
+import {computed} from 'vue'
+import type {BookUpdate} from '../types'
+import {getExchangeColor} from '../constants'
 
 const props = defineProps<{
   books: BookUpdate[]
@@ -58,15 +58,15 @@ const aggregatedBids = computed((): AggregatedLevel[] => {
 
   // Convert to array and sort by price (descending for bids)
   return Array.from(priceMap.entries())
-    .map(([price, exchanges]) => {
-      const totalQty = exchanges.reduce((sum, ex) => sum + parseFloat(ex.quantity), 0)
-      return {
-        price,
-        quantity: totalQty.toString(),
-        exchanges
-      }
-    })
-    .sort((a, b) => parseFloat(b.price) - parseFloat(a.price))
+      .map(([price, exchanges]) => {
+        const totalQty = exchanges.reduce((sum, ex) => sum + parseFloat(ex.quantity), 0)
+        return {
+          price,
+          quantity: totalQty.toString(),
+          exchanges
+        }
+      })
+      .sort((a, b) => parseFloat(b.price) - parseFloat(a.price))
 })
 
 // Aggregate asks from all exchanges
@@ -88,15 +88,15 @@ const aggregatedAsks = computed((): AggregatedLevel[] => {
 
   // Convert to array and sort by price (ascending for asks)
   return Array.from(priceMap.entries())
-    .map(([price, exchanges]) => {
-      const totalQty = exchanges.reduce((sum, ex) => sum + parseFloat(ex.quantity), 0)
-      return {
-        price,
-        quantity: totalQty.toString(),
-        exchanges
-      }
-    })
-    .sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
+      .map(([price, exchanges]) => {
+        const totalQty = exchanges.reduce((sum, ex) => sum + parseFloat(ex.quantity), 0)
+        return {
+          price,
+          quantity: totalQty.toString(),
+          exchanges
+        }
+      })
+      .sort((a, b) => parseFloat(a.price) - parseFloat(b.price))
 })
 
 // Calculate max quantity for volume bar scaling
@@ -124,7 +124,7 @@ const spread = computed(() => {
   const spreadVal = parseFloat(bestAsk.value) - parseFloat(bestBid.value)
   const mid = (parseFloat(bestBid.value) + parseFloat(bestAsk.value)) / 2
   const spreadPct = (spreadVal / mid) * 100
-  return { value: spreadVal, percent: spreadPct }
+  return {value: spreadVal, percent: spreadPct}
 })
 
 function formatPrice(price: string): string {
@@ -150,10 +150,10 @@ function getBarWidth(quantity: string): string {
       <h2>Multi-Exchange Order Book</h2>
       <div v-if="books.length > 0" class="exchanges-info">
         <span
-          v-for="book in books"
-          :key="book.exchange"
-          class="exchange-badge"
-          :style="{ backgroundColor: getExchangeColor(book.exchange) }"
+            v-for="book in books"
+            :key="book.exchange"
+            class="exchange-badge"
+            :style="{ backgroundColor: getExchangeColor(book.exchange) }"
         >
           {{ book.exchange }}
         </span>
@@ -175,20 +175,20 @@ function getBarWidth(quantity: string): string {
       <!-- Asks (reversed to show lowest at bottom) -->
       <div class="levels asks">
         <div
-          v-for="level in [...aggregatedAsks].reverse()"
-          :key="'ask-' + level.price"
-          class="level ask"
+            v-for="level in [...aggregatedAsks].reverse()"
+            :key="'ask-' + level.price"
+            class="level ask"
         >
           <div class="bar ask-bar" :style="{ width: getBarWidth(level.quantity) }"></div>
           <span class="price">{{ formatPrice(level.price) }}</span>
           <span class="quantity">{{ formatQuantity(level.quantity) }}</span>
           <span class="exchanges">
             <span
-              v-for="ex in level.exchanges"
-              :key="ex.name"
-              class="exchange-mini-badge"
-              :style="{ backgroundColor: getExchangeColor(ex.name) }"
-              :title="`${ex.name}: ${formatQuantity(ex.quantity)}`"
+                v-for="ex in level.exchanges"
+                :key="ex.name"
+                class="exchange-mini-badge"
+                :style="{ backgroundColor: getExchangeColor(ex.name) }"
+                :title="`${ex.name}: ${formatQuantity(ex.quantity)}`"
             >
               {{ ex.name.substring(0, 3) }}
             </span>
@@ -206,20 +206,20 @@ function getBarWidth(quantity: string): string {
       <!-- Bids -->
       <div class="levels bids">
         <div
-          v-for="level in aggregatedBids"
-          :key="'bid-' + level.price"
-          class="level bid"
+            v-for="level in aggregatedBids"
+            :key="'bid-' + level.price"
+            class="level bid"
         >
           <div class="bar bid-bar" :style="{ width: getBarWidth(level.quantity) }"></div>
           <span class="price">{{ formatPrice(level.price) }}</span>
           <span class="quantity">{{ formatQuantity(level.quantity) }}</span>
           <span class="exchanges">
             <span
-              v-for="ex in level.exchanges"
-              :key="ex.name"
-              class="exchange-mini-badge"
-              :style="{ backgroundColor: getExchangeColor(ex.name) }"
-              :title="`${ex.name}: ${formatQuantity(ex.quantity)}`"
+                v-for="ex in level.exchanges"
+                :key="ex.name"
+                class="exchange-mini-badge"
+                :style="{ backgroundColor: getExchangeColor(ex.name) }"
+                :title="`${ex.name}: ${formatQuantity(ex.quantity)}`"
             >
               {{ ex.name.substring(0, 3) }}
             </span>

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { useWebSocket } from './composables/useWebSocket'
+import {useWebSocket} from './composables/useWebSocket'
 import OrderBook from './components/OrderBook.vue'
 import RecentTrades from './components/RecentTrades.vue'
 import MetricsPanel from './components/MetricsPanel.vue'
-import { EXCHANGE_COLORS } from './constants'
+import {EXCHANGE_COLORS} from './constants'
 
 const {
   symbolBooks,
@@ -25,14 +25,14 @@ const {
         <h1>FlowRS</h1>
         <span class="subtitle">Real-time Order Book Visualizer</span>
       </div>
-      
+
       <div class="symbol-selector">
         <button
-          v-for="symbol in symbols"
-          :key="symbol"
-          class="symbol-btn"
-          :class="{ active: selectedSymbol === symbol }"
-          @click="selectSymbol(symbol)"
+            v-for="symbol in symbols"
+            :key="symbol"
+            class="symbol-btn"
+            :class="{ active: selectedSymbol === symbol }"
+            @click="selectSymbol(symbol)"
         >
           {{ symbol.replace('USDT', '') }}
         </button>
@@ -41,16 +41,16 @@ const {
       <div class="exchange-filters">
         <span class="filter-label">Exchanges:</span>
         <button
-          v-for="exchange in ['Binance', 'Bybit', 'Coinbase', 'Kraken']"
-          :key="exchange"
-          class="exchange-toggle-btn"
-          :class="{ active: enabledExchanges.has(exchange) }"
-          :style="enabledExchanges.has(exchange) ? {
+            v-for="exchange in ['Binance', 'Bybit', 'Coinbase', 'Kraken']"
+            :key="exchange"
+            class="exchange-toggle-btn"
+            :class="{ active: enabledExchanges.has(exchange) }"
+            :style="enabledExchanges.has(exchange) ? {
             background: EXCHANGE_COLORS[exchange],
             borderColor: EXCHANGE_COLORS[exchange],
             color: '#000'
           } : {}"
-          @click="toggleExchange(exchange)"
+            @click="toggleExchange(exchange)"
         >
           {{ exchange }}
         </button>
@@ -63,12 +63,12 @@ const {
 
     <main>
       <div class="orderbook-section">
-        <OrderBook :books="symbolBooks" :symbol="selectedSymbol" />
+        <OrderBook :books="symbolBooks" :symbol="selectedSymbol"/>
       </div>
 
       <div class="sidebar">
-        <MetricsPanel :metrics="metrics" :connected="connected" :selected-symbol="selectedSymbol" />
-        <RecentTrades :trades="trades" :symbol="selectedSymbol" />
+        <MetricsPanel :metrics="metrics" :connected="connected"/>
+        <RecentTrades :trades="trades" :symbol="selectedSymbol"/>
       </div>
     </main>
   </div>
@@ -83,7 +83,7 @@ const {
 
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-    Ubuntu, Cantarell, sans-serif;
+  Ubuntu, Cantarell, sans-serif;
   background: #0f0f1a;
   color: #fff;
   min-height: 100vh;
@@ -241,12 +241,12 @@ main {
   main {
     grid-template-columns: 1fr;
   }
-  
+
   .sidebar {
     flex-direction: row;
     max-height: none;
   }
-  
+
   .sidebar > * {
     flex: 1;
     max-height: 400px;
@@ -258,7 +258,7 @@ main {
     order: 3;
     width: 100%;
   }
-  
+
   .sidebar {
     flex-direction: column;
   }

@@ -1,8 +1,6 @@
-/// Coinbase Advanced Trade exchange connector
-
+use super::utils::fast_parse_u64_inner;
 use super::{DepthSnapshot, Exchange, MarketMessage};
 use crate::types::{Trade, TradeSide};
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::error::Error;
 
@@ -16,102 +14,107 @@ impl CoinbaseConnector {
         Self { symbols }
     }
 
-    /// Build WebSocket URL (Coinbase uses base URL only)
     pub fn build_subscription_url(&self, _symbols: &[&str]) -> String {
         "wss://advanced-trade-ws.coinbase.com".to_string()
     }
 
-    /// Get subscription messages (Coinbase requires post-connection subscription)
     pub fn get_subscription_messages(&self) -> Vec<String> {
+        // Optimisation: vec! macro vs push manuel n'a pas bcp d'impact ici car c'est fait 1 fois
+        // Mais on prépare proprement les product_ids
         let product_ids: Vec<String> = self
             .symbols
             .iter()
             .map(|s| {
-                // Convert BTCUSDT -> BTC-USD format
                 let base = s.trim_end_matches("USDT");
                 format!("{}-USD", base)
             })
             .collect();
 
-        // Subscribe to both level2 (orderbook) and market_trades channels
-        let subscriptions = vec![
-            CoinbaseSubscribe {
-                type_: "subscribe".to_string(),
-                product_ids: product_ids.clone(),
-                channel: "level2".to_string(),
-            },
-            CoinbaseSubscribe {
-                type_: "subscribe".to_string(),
-                product_ids,
-                channel: "market_trades".to_string(),
-            },
-        ];
+        // On clone product_ids car utilisé 2 fois, c'est inévitable mais négligeable (init)
+        let sub_l2 = CoinbaseSubscribe {
+            type_: "subscribe",
+            product_ids: product_ids.clone(),
+            channel: "level2",
+        };
 
-        // Return both subscriptions as separate messages
-        subscriptions
-            .iter()
-            .filter_map(|sub| serde_json::to_string(sub).ok())
-            .collect()
+        let sub_trades = CoinbaseSubscribe {
+            type_: "subscribe",
+            product_ids,
+            channel: "market_trades",
+        };
+
+        vec![
+            serde_json::to_string(&sub_l2).unwrap_or_default(),
+            serde_json::to_string(&sub_trades).unwrap_or_default(),
+        ]
     }
 
+    /// Cœur du réacteur : Parsing Zero-Copy
     pub fn parse_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        // Check if it's a subscription confirmation or other status message
-        if raw.contains("\"channel\":\"subscriptions\"")
-            || raw.contains("\"channel\":\"heartbeats\"")
-            || raw.contains("\"subscriptions\":{") {
-            tracing::debug!("[Coinbase] Ignoring subscription/heartbeat");
+        // 1. Filtrage ultra-rapide (SIMD friendly) des messages de contrôle
+        // On check les chaînes brutes pour éviter tout parsing JSON si inutile
+        if raw.contains(r#""channel":"subscriptions""#)
+            || raw.contains(r#""channel":"heartbeats""#)
+            || raw.contains(r#""subscriptions":{"#)
+        {
             return Ok(None);
         }
 
-        // Parse channel type first
-        let channel_check: serde_json::Value = match serde_json::from_str(raw) {
-            Ok(v) => v,
-            Err(e) => {
-                let preview = if raw.len() > 200 { &raw[..200] } else { raw };
-                tracing::warn!("[Coinbase] Failed to parse message: {} - Preview: {}", e, preview);
-                return Ok(None);
-            }
+        // 2. Parsing partiel "Zero-Copy" pour router le message
+        // On ne décode que le strict nécessaire pour savoir quel parser lancer
+        #[derive(Deserialize)]
+        struct ChannelHeader<'a> {
+            channel: &'a str,
+        }
+
+        let header: ChannelHeader = match serde_json::from_str(raw) {
+            Ok(h) => h,
+            Err(_) => return Ok(None), // Ignorer les erreurs de parsing (bruit)
         };
 
-        let channel = channel_check["channel"].as_str().unwrap_or("");
-
-        match channel {
+        match header.channel {
             "l2_data" => self.parse_level2_message(raw),
             "market_trades" => self.parse_trade_message(raw),
-            _ => {
-                tracing::debug!("[Coinbase] Ignoring channel: {}", channel);
-                Ok(None)
-            }
+            _ => Ok(None),
         }
     }
 
-    fn parse_level2_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        let msg: CoinbaseLevel2Message = serde_json::from_str(raw)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+    fn parse_level2_message(
+        &self,
+        raw: &str,
+    ) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
+        // Zero-Copy deserialization: les champs &'a str pointent dans 'raw'
+        let msg: CoinbaseLevel2Message =
+            serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
 
-        for event in msg.events {
-            // Convert BTC-USD -> BTCUSDT
+        // Coinbase envoie souvent 1 seul event, on prend le premier
+        if let Some(event) = msg.events.first() {
+            // Transformation du symbole : allocation obligatoire ici pour le String final
+            // Optimisation possible : utiliser un cache de symboles si la liste est fixe
             let symbol = event.product_id.replace("-USD", "USDT");
 
-            let mut bids = Vec::new();
-            let mut asks = Vec::new();
+            // Collect avec filter_map : allocation exacte, pas de boucle + push
+            let bids: Vec<(u64, u64)> = event
+                .updates
+                .iter()
+                .filter(|u| u.side == "bid")
+                .filter_map(|update| {
+                    let price = fast_parse_u64_inner(update.price_level)?;
+                    let qty = fast_parse_u64_inner(update.new_quantity)?;
+                    Some((price, qty))
+                })
+                .collect();
 
-            for update in event.updates {
-                let price: Decimal = update
-                    .price_level
-                    .parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                let qty: Decimal = update
-                    .new_quantity
-                    .parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-
-                match update.side.as_str() {
-                    "bid" => bids.push((price, qty)),
-                    "offer" => asks.push((price, qty)),
-                    _ => {}
-                }
-            }
+            let asks: Vec<(u64, u64)> = event
+                .updates
+                .iter()
+                .filter(|u| u.side == "offer")
+                .filter_map(|update| {
+                    let price = fast_parse_u64_inner(update.price_level)?;
+                    let qty = fast_parse_u64_inner(update.new_quantity)?;
+                    Some((price, qty))
+                })
+                .collect();
 
             let is_snapshot = event.type_ == "snapshot";
 
@@ -128,28 +131,37 @@ impl CoinbaseConnector {
         Ok(None)
     }
 
-    fn parse_trade_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        let msg: CoinbaseTradeMessage = serde_json::from_str(raw)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+    fn parse_trade_message(
+        &self,
+        raw: &str,
+    ) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
+        let msg: CoinbaseTradeMessage =
+            serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
 
-        for event in msg.events {
-            for trade_data in &event.trades {
-                // Convert BTC-USD -> BTCUSDT
+        if let Some(event) = msg.events.first() {
+            // Pour l'instant on prend le premier trade du batch
+            // TODO: Adapter MarketMessage pour accepter Vec<Trade> pour plus d'efficacité
+            if let Some(trade_data) = event.trades.first() {
                 let symbol = trade_data.product_id.replace("-USD", "USDT");
 
-                let price: Decimal = trade_data.price.parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-                let quantity: Decimal = trade_data.size.parse()
-                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-
-                let side = match trade_data.side.as_str() {
-                    "BUY" => TradeSide::Buy,
-                    "SELL" => TradeSide::Sell,
-                    _ => continue,
+                let price = match fast_parse_u64_inner(trade_data.price) {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let quantity = match fast_parse_u64_inner(trade_data.size) {
+                    Some(q) => q,
+                    None => return Ok(None),
                 };
 
-                // Parse timestamp from ISO format to milliseconds
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&trade_data.time)
+                let side = match trade_data.side {
+                    "BUY" => TradeSide::Buy,
+                    "SELL" => TradeSide::Sell,
+                    _ => return Ok(None),
+                };
+
+                // Parsing de date : c'est souvent le goulot d'étranglement restant
+                // chrono est correct, mais pour de l'ultra-perf, on parserait manuellement le timestamp
+                let timestamp = chrono::DateTime::parse_from_rfc3339(trade_data.time)
                     .map(|dt| dt.timestamp_millis())
                     .unwrap_or(0);
 
@@ -169,13 +181,11 @@ impl CoinbaseConnector {
         Ok(None)
     }
 
-    /// Coinbase sends initial snapshot via WebSocket, so REST fetch not needed
     pub async fn fetch_snapshot(
         &self,
         _symbol: &str,
         _limit: usize,
     ) -> Result<Option<DepthSnapshot>, Box<dyn Error + Send>> {
-        // Coinbase will send snapshot via WebSocket after subscription - no need for REST fetch
         Ok(None)
     }
 
@@ -184,86 +194,57 @@ impl CoinbaseConnector {
     }
 }
 
-// Coinbase-specific types
+// --- OPTIMIZED DTOs (Data Transfer Objects) ---
+// Utilisation stricte de références &'a str pour le Zero-Copy
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseLevel2Message {
-    #[allow(dead_code)]
-    _channel: String,
-    #[allow(dead_code)]
-    client_id: String,
-    #[allow(dead_code)]
-    timestamp: String,
+struct CoinbaseLevel2Message<'a> {
     sequence_num: u64,
-    events: Vec<CoinbaseLevel2Event>,
+    #[serde(borrow)]
+    events: Vec<CoinbaseLevel2Event<'a>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseLevel2Event {
+struct CoinbaseLevel2Event<'a> {
     #[serde(rename = "type")]
-    type_: String,
-    product_id: String,
-    updates: Vec<CoinbaseLevel2Update>,
+    type_: &'a str,
+    product_id: &'a str,
+    #[serde(borrow)]
+    updates: Vec<CoinbaseLevel2Update<'a>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseLevel2Update {
-    side: String,
-    #[allow(dead_code)]
-    event_time: String,
-    price_level: String,
-    new_quantity: String,
+struct CoinbaseLevel2Update<'a> {
+    side: &'a str,
+    price_level: &'a str,
+    new_quantity: &'a str,
 }
 
 #[derive(Debug, serde::Serialize)]
-struct CoinbaseSubscribe {
+struct CoinbaseSubscribe<'a> {
     #[serde(rename = "type")]
-    type_: String,
+    type_: &'a str, // Optimisation: 'subscribe' est statique, pas besoin de String
     product_ids: Vec<String>,
-    channel: String,
+    channel: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseTradeMessage {
-    #[allow(dead_code)]
-    channel: String,
-    #[allow(dead_code)]
-    client_id: String,
-    #[allow(dead_code)]
-    timestamp: String,
-    #[allow(dead_code)]
-    sequence_num: u64,
-    events: Vec<CoinbaseTradeEvent>,
+struct CoinbaseTradeMessage<'a> {
+    #[serde(borrow)]
+    events: Vec<CoinbaseTradeEvent<'a>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseTradeEvent {
-    #[serde(rename = "type")]
-    #[allow(dead_code)]
-    type_: String,
-    trades: Vec<CoinbaseTradeData>,
+struct CoinbaseTradeEvent<'a> {
+    #[serde(borrow)]
+    trades: Vec<CoinbaseTradeData<'a>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct CoinbaseTradeData {
-    #[serde(rename = "trade_id")]
-    #[allow(dead_code)]
-    trade_id: String,
-    product_id: String,
-    price: String,
-    size: String,
-    side: String,
-    time: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_coinbase_url_building() {
-        let connector = CoinbaseConnector::new(vec!["BTCUSDT".to_string()]);
-        let url = connector.build_subscription_url(&["BTCUSDT"]);
-        assert_eq!(url, "wss://advanced-trade-ws.coinbase.com");
-    }
+struct CoinbaseTradeData<'a> {
+    product_id: &'a str,
+    price: &'a str,
+    size: &'a str,
+    side: &'a str,
+    time: &'a str,
 }

@@ -1,8 +1,7 @@
+use super::utils::fast_parse_u64_inner;
 /// Bybit exchange connector
-
 use super::{DepthSnapshot, Exchange, MarketMessage};
 use crate::types::{Trade, TradeSide};
-use rust_decimal::Decimal;
 use std::error::Error;
 
 #[derive(Clone)]
@@ -20,17 +19,11 @@ impl BybitConnector {
         "wss://stream.bybit.com/v5/public/linear".to_string()
     }
 
-
     /// Build subscription messages for Bybit WebSocket
     pub fn get_subscription_messages(&self, symbols: &[&str]) -> Vec<String> {
         let args: Vec<String> = symbols
             .iter()
-            .flat_map(|s| {
-                vec![
-                    format!("orderbook.50.{}", s),
-                    format!("publicTrade.{}", s),
-                ]
-            })
+            .flat_map(|s| vec![format!("orderbook.50.{}", s), format!("publicTrade.{}", s)])
             .collect();
 
         let subscription = serde_json::json!({
@@ -42,8 +35,8 @@ impl BybitConnector {
     }
 
     pub fn parse_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        let msg: serde_json::Value = serde_json::from_str(raw)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+        let msg: serde_json::Value =
+            serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
 
         // Bybit format: {"topic": "orderbook.25.BTCUSDT", "type": "snapshot|delta", "data": {...}}
         if let Some(topic) = msg["topic"].as_str() {
@@ -58,24 +51,24 @@ impl BybitConnector {
                         tracing::debug!("[Bybit] Received snapshot for {}", symbol);
                     }
 
-                    let bids: Vec<(Decimal, Decimal)> = msg["data"]["b"]
+                    let bids: Vec<(u64, u64)> = msg["data"]["b"]
                         .as_array()
                         .unwrap_or(&vec![])
                         .iter()
                         .filter_map(|item| {
-                            let price = item[0].as_str()?.parse().ok()?;
-                            let qty = item[1].as_str()?.parse().ok()?;
+                            let price = fast_parse_u64_inner(item[0].as_str()?)?;
+                            let qty = fast_parse_u64_inner(item[1].as_str()?)?;
                             Some((price, qty))
                         })
                         .collect();
 
-                    let asks: Vec<(Decimal, Decimal)> = msg["data"]["a"]
+                    let asks: Vec<(u64, u64)> = msg["data"]["a"]
                         .as_array()
                         .unwrap_or(&vec![])
                         .iter()
                         .filter_map(|item| {
-                            let price = item[0].as_str()?.parse().ok()?;
-                            let qty = item[1].as_str()?.parse().ok()?;
+                            let price = fast_parse_u64_inner(item[0].as_str()?)?;
+                            let qty = fast_parse_u64_inner(item[1].as_str()?)?;
                             Some((price, qty))
                         })
                         .collect();
@@ -106,11 +99,14 @@ impl BybitConnector {
                                 trade_data["v"].as_str(),
                                 trade_data["S"].as_str(),
                             ) {
-                                let price: Decimal = price_str.parse()
-                                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
-
-                                let quantity: Decimal = qty_str.parse()
-                                    .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+                                let price = match fast_parse_u64_inner(price_str) {
+                                    Some(p) => p,
+                                    None => continue,
+                                };
+                                let quantity = match fast_parse_u64_inner(qty_str) {
+                                    Some(q) => q,
+                                    None => continue,
+                                };
 
                                 let side = match side_str {
                                     "Buy" => TradeSide::Buy,

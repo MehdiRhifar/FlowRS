@@ -1,8 +1,7 @@
+use super::utils::fast_parse_f64_inner;
 /// Kraken exchange connector (WebSocket v2)
-
 use super::{DepthSnapshot, Exchange, MarketMessage};
 use crate::types::{Trade, TradeSide};
-use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::error::Error;
 
@@ -66,8 +65,10 @@ impl KrakenConnector {
         // Check if it's a subscription confirmation, status, or heartbeat message
         if raw.contains("\"method\":\"subscribe\"")
             || raw.contains("\"channel\":\"heartbeat\"")
-            || raw.contains("\"channel\":\"status\"") {
-            tracing::debug!("[Kraken] Ignoring status/heartbeat message");
+            || raw.contains("\"channel\":\"status\"")
+        {
+            let preview = if raw.len() > 150 { &raw[..150] } else { raw };
+            tracing::debug!("[Kraken] Ignoring status/heartbeat: {}", preview);
             return Ok(None);
         }
 
@@ -76,7 +77,11 @@ impl KrakenConnector {
             Ok(v) => v,
             Err(e) => {
                 let preview = if raw.len() > 200 { &raw[..200] } else { raw };
-                tracing::warn!("[Kraken] Failed to parse message: {} - Preview: {}", e, preview);
+                tracing::warn!(
+                    "[Kraken] Failed to parse message: {} - Preview: {}",
+                    e,
+                    preview
+                );
                 return Ok(None);
             }
         };
@@ -93,31 +98,34 @@ impl KrakenConnector {
         }
     }
 
-    fn parse_book_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        let msg: KrakenBookMessage = serde_json::from_str(raw)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+    fn parse_book_message(
+        &self,
+        raw: &str,
+    ) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
+        let msg: KrakenBookMessage =
+            serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
 
         for data in msg.data {
             // Convert BTC/USD -> BTCUSDT
             let symbol = data.symbol.replace("/USD", "USDT");
             let is_snapshot = msg.type_ == "snapshot";
 
-            let bids: Vec<(Decimal, Decimal)> = data
+            let bids: Vec<(u64, u64)> = data
                 .bids
                 .iter()
                 .filter_map(|b| {
-                    let price = Decimal::from_f64_retain(b.price)?;
-                    let qty = Decimal::from_f64_retain(b.qty)?;
+                    let price = fast_parse_f64_inner(b.price)?;
+                    let qty = fast_parse_f64_inner(b.qty)?;
                     Some((price, qty))
                 })
                 .collect();
 
-            let asks: Vec<(Decimal, Decimal)> = data
+            let asks: Vec<(u64, u64)> = data
                 .asks
                 .iter()
                 .filter_map(|a| {
-                    let price = Decimal::from_f64_retain(a.price)?;
-                    let qty = Decimal::from_f64_retain(a.qty)?;
+                    let price = fast_parse_f64_inner(a.price)?;
+                    let qty = fast_parse_f64_inner(a.qty)?;
                     Some((price, qty))
                 })
                 .collect();
@@ -140,18 +148,25 @@ impl KrakenConnector {
         Ok(None)
     }
 
-    fn parse_trade_message(&self, raw: &str) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
-        let msg: KrakenTradeMessage = serde_json::from_str(raw)
-            .map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
+    fn parse_trade_message(
+        &self,
+        raw: &str,
+    ) -> Result<Option<MarketMessage>, Box<dyn Error + Send>> {
+        let msg: KrakenTradeMessage =
+            serde_json::from_str(raw).map_err(|e| Box::new(e) as Box<dyn Error + Send>)?;
         for data in msg.data {
             // Convert BTC/USD -> BTCUSDT
             let symbol = data.symbol.replace("/USD", "USDT");
 
-            // Kraken envoie des f64, on les convertit en Decimal
-            let price = Decimal::from_f64_retain(data.price)
-                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid price")) as Box<dyn Error + Send>)?;
-            let quantity = Decimal::from_f64_retain(data.qty)
-                .ok_or_else(|| Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid quantity")) as Box<dyn Error + Send>)?;
+            // Kraken envoie des f64, on les convertit en u64 scaled
+            let price = match fast_parse_f64_inner(data.price) {
+                Some(p) => p,
+                None => continue,
+            };
+            let quantity = match fast_parse_f64_inner(data.qty) {
+                Some(q) => q,
+                None => continue,
+            };
 
             let side = match data.side.as_str() {
                 "buy" => TradeSide::Buy,
@@ -199,7 +214,7 @@ impl KrakenConnector {
 #[derive(Debug, Deserialize)]
 struct KrakenBookMessage {
     #[allow(dead_code)]
-    _channel: String,
+    channel: String,
     #[serde(rename = "type")]
     type_: String,
     data: Vec<KrakenBookData>,
@@ -217,7 +232,7 @@ struct KrakenBookData {
 
 #[derive(Debug, Deserialize)]
 struct KrakenPriceLevel {
-    price: f64,  // Kraken sends numbers, not strings
+    price: f64, // Kraken sends numbers, not strings
     qty: f64,
 }
 
@@ -250,8 +265,8 @@ struct KrakenTradeMessage {
 #[derive(Debug, Deserialize)]
 struct KrakenTradeData {
     symbol: String,
-    price: f64,        // Kraken envoie un nombre, pas une string
-    qty: f64,          // Kraken envoie un nombre, pas une string
+    price: f64, // Kraken envoie un nombre, pas une string
+    qty: f64,   // Kraken envoie un nombre, pas une string
     side: String,
     timestamp: String, // ISO 8601 format
     #[allow(dead_code)]

@@ -1,22 +1,25 @@
-use crate::orderbook::SharedOrderBookManager;
-use crate::types::{Metrics, SymbolMetrics, TRADING_PAIRS};
-use rust_decimal::Decimal;
-use std::collections::HashMap;
+use crate::types::Metrics;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use sysinfo::System;
-use tokio::sync::RwLock;
 
 /// Number of latency samples to keep for percentile calculations
-const LATENCY_SAMPLE_SIZE: usize = 8192; // Power of 2 for fast modulo
+const LATENCY_SAMPLE_SIZE: usize = 2048; // Power of 2 for fast modulo
+const LATENCY_SAMPLE_MASK: usize = LATENCY_SAMPLE_SIZE - 1; // For fast modulo via bitwise AND
 
-/// Lock-free ring buffer for latency samples
-/// Uses atomic operations for writing, only needs lock for reading percentiles
+/// Lock-free ring buffer for latency samples with cached percentiles
+/// Uses atomic operations for writing, percentiles computed in background
 pub struct LockFreeLatencyBuffer {
     samples: Box<[AtomicU64; LATENCY_SAMPLE_SIZE]>,
     write_index: AtomicUsize,
     count: AtomicU64,
+    // Cached percentiles (updated periodically, not on every read)
+    cached_p50: AtomicU64,
+    cached_p95: AtomicU64,
+    cached_p99: AtomicU64,
+    // Pre-allocated buffer for percentile calculation (avoids allocation each time)
+    scratch_buffer: std::sync::Mutex<Vec<u64>>,
 }
 
 impl LockFreeLatencyBuffer {
@@ -29,45 +32,72 @@ impl LockFreeLatencyBuffer {
             }
             vec.into_boxed_slice().try_into().unwrap()
         };
-        
+
         Self {
             samples,
             write_index: AtomicUsize::new(0),
             count: AtomicU64::new(0),
+            cached_p50: AtomicU64::new(0),
+            cached_p95: AtomicU64::new(0),
+            cached_p99: AtomicU64::new(0),
+            // Pre-allocate buffer once, reuse for each percentile calculation
+            scratch_buffer: std::sync::Mutex::new(Vec::with_capacity(LATENCY_SAMPLE_SIZE)),
         }
     }
 
     /// Record a latency sample - lock-free O(1)
-    #[inline]
+    #[inline(always)]
     pub fn record(&self, latency_us: u64) {
-        let index = self.write_index.fetch_add(1, Ordering::Relaxed) % LATENCY_SAMPLE_SIZE;
+        // Use bitwise AND instead of modulo for power-of-2 sizes
+        let index = self.write_index.fetch_add(1, Ordering::Relaxed) & LATENCY_SAMPLE_MASK;
         self.samples[index].store(latency_us, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Get percentiles - requires collecting samples (called infrequently)
-    pub fn get_percentiles(&self) -> (u64, u64, u64, u64, u64) {
+    /// Get cached percentiles - O(1), no allocation
+    #[inline(always)]
+    pub fn get_cached_percentiles(&self) -> (u64, u64, u64) {
+        (
+            self.cached_p50.load(Ordering::Relaxed),
+            self.cached_p95.load(Ordering::Relaxed),
+            self.cached_p99.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Update cached percentiles - called periodically in background
+    /// Uses partial selection (O(n)) instead of full sort (O(n log n))
+    /// Reuses pre-allocated buffer to avoid allocation
+    pub fn update_percentiles(&self) {
         let count = self.count.load(Ordering::Relaxed) as usize;
         let len = count.min(LATENCY_SAMPLE_SIZE);
-        
-        if len == 0 {
-            return (0, 0, 0, 0, 0);
+
+        if len < 10 {
+            return; // Not enough samples for meaningful percentiles
         }
 
-        // Collect samples into a vec for sorting
-        let mut samples: Vec<u64> = Vec::with_capacity(len);
-        for i in 0..len {
-            samples.push(self.samples[i].load(Ordering::Relaxed));
-        }
-        samples.sort_unstable();
+        // Reuse pre-allocated buffer - no allocation!
+        let mut scratch = self.scratch_buffer.lock().unwrap();
+        scratch.clear();
+        scratch.extend((0..len).map(|i| self.samples[i].load(Ordering::Relaxed)));
 
-        let min = samples[0];
-        let max = samples[len - 1];
-        let p50 = samples[(len as f64 * 0.50) as usize];
-        let p95 = samples[((len as f64 * 0.95) as usize).min(len - 1)];
-        let p99 = samples[((len as f64 * 0.99) as usize).min(len - 1)];
+        // Use partial selection - O(n) instead of O(n log n)
+        // P99 first (highest index), then P95, then P50
+        // This order is more efficient because select_nth_unstable partially sorts
+        let p99_idx = (len * 99 / 100).min(len - 1);
+        let (_, p99, _) = scratch.select_nth_unstable(p99_idx);
+        let p99_val = *p99;
 
-        (min, max, p50, p95, p99)
+        let p95_idx = (len * 95 / 100).min(len - 1);
+        let (_, p95, _) = scratch.select_nth_unstable(p95_idx);
+        let p95_val = *p95;
+
+        let p50_idx = len / 2;
+        let (_, p50, _) = scratch.select_nth_unstable(p50_idx);
+        let p50_val = *p50;
+
+        self.cached_p50.store(p50_val, Ordering::Relaxed);
+        self.cached_p95.store(p95_val, Ordering::Relaxed);
+        self.cached_p99.store(p99_val, Ordering::Relaxed);
     }
 }
 
@@ -79,92 +109,72 @@ impl std::fmt::Debug for LockFreeLatencyBuffer {
     }
 }
 
-/// Per-symbol metrics collector
-#[derive(Debug)]
-pub struct SymbolMetricsCollector {
-    message_count: AtomicU64,
-    trade_count: AtomicU64,
-    latency_sum_us: AtomicU64,
-    latency_count: AtomicU64,
-    last_message_count: AtomicU64,
-    last_trade_count: AtomicU64,
+/// Cache for system metrics to avoid expensive syscalls every second
+/// Updated every 10 seconds in a background task
+/// Uses AtomicU64 with f64::to_bits/from_bits for lock-free access
+pub struct SystemMetricsCache {
+    // Store f64 as u64 bits for atomic access
+    memory_used_mb_bits: AtomicU64,
+    memory_rss_mb_bits: AtomicU64,
+    cpu_usage_percent_bits: AtomicU64,
 }
 
-impl SymbolMetricsCollector {
-    pub fn new(_symbol: &str) -> Self {
+impl SystemMetricsCache {
+    pub fn new() -> Self {
         Self {
-            message_count: AtomicU64::new(0),
-            trade_count: AtomicU64::new(0),
-            latency_sum_us: AtomicU64::new(0),
-            latency_count: AtomicU64::new(0),
-            last_message_count: AtomicU64::new(0),
-            last_trade_count: AtomicU64::new(0),
+            memory_used_mb_bits: AtomicU64::new(0.0_f64.to_bits()),
+            memory_rss_mb_bits: AtomicU64::new(0.0_f64.to_bits()),
+            cpu_usage_percent_bits: AtomicU64::new(0.0_f64.to_bits()),
         }
     }
 
     #[inline]
-    pub fn record_message(&self) {
-        self.message_count.fetch_add(1, Ordering::Relaxed);
+    pub fn get(&self) -> (f64, f64, f64) {
+        let mem = f64::from_bits(self.memory_used_mb_bits.load(Ordering::Relaxed));
+        let rss = f64::from_bits(self.memory_rss_mb_bits.load(Ordering::Relaxed));
+        let cpu = f64::from_bits(self.cpu_usage_percent_bits.load(Ordering::Relaxed));
+        (mem, rss, cpu)
     }
 
-    #[inline]
-    pub fn record_trade(&self) {
-        self.trade_count.fetch_add(1, Ordering::Relaxed);
-    }
+    pub fn update(&self) {
+        tokio::task::block_in_place(|| {
+            let mut system = System::new();
 
-    /// Record latency - now lock-free, no async needed
-    #[inline]
-    pub fn record_latency_us(&self, latency_us: u64) {
-        self.latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
-        self.latency_count.fetch_add(1, Ordering::Relaxed);
-    }
+            // Get current process memory (RSS = Resident Set Size)
+            let pid = sysinfo::Pid::from_u32(std::process::id());
+            system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing().with_memory(),
+            );
 
-    pub fn compute_metrics(&self, elapsed_secs: f64) -> SymbolMetrics {
-        let current_messages = self.message_count.load(Ordering::Relaxed);
-        let current_trades = self.trade_count.load(Ordering::Relaxed);
+            let (process_mem_mb, process_virt_mb) = system
+                .process(pid)
+                .map(|p| {
+                    let rss = p.memory() as f64 / 1024.0 / 1024.0; // bytes -> MB
+                    let virt = p.virtual_memory() as f64 / 1024.0 / 1024.0;
+                    (rss, virt)
+                })
+                .unwrap_or((0.0, 0.0));
 
-        let prev_messages = self.last_message_count.swap(current_messages, Ordering::Relaxed);
-        let prev_trades = self.last_trade_count.swap(current_trades, Ordering::Relaxed);
+            // CPU usage requires two refreshes with a delay, skip for now
+            // Just use 0.0 as placeholder (CPU tracking adds overhead)
+            let cpu: f64 = 0.0;
 
-        let messages_per_second = if elapsed_secs > 0.0 {
-            ((current_messages - prev_messages) as f64 / elapsed_secs) as u64
-        } else {
-            0
-        };
-
-        let trades_per_second = if elapsed_secs > 0.0 {
-            ((current_trades - prev_trades) as f64 / elapsed_secs) as u64
-        } else {
-            0
-        };
-
-        let latency_sum = self.latency_sum_us.swap(0, Ordering::Relaxed);
-        let latency_count = self.latency_count.swap(0, Ordering::Relaxed);
-        let latency_avg_us = if latency_count > 0 {
-            latency_sum as f64 / latency_count as f64
-        } else {
-            0.0
-        };
-
-        SymbolMetrics {
-            messages_per_second,
-            trades_per_second,
-            latency_avg_us,
-            spread_bps: None,
-        }
+            self.memory_used_mb_bits
+                .store(process_mem_mb.to_bits(), Ordering::Relaxed);
+            self.memory_rss_mb_bits
+                .store(process_virt_mb.to_bits(), Ordering::Relaxed);
+            self.cpu_usage_percent_bits
+                .store(cpu.to_bits(), Ordering::Relaxed);
+        });
     }
 }
 
 /// Global metrics collector for performance monitoring
 pub struct MetricsCollector {
-    /// Per-symbol collectors
-    symbol_collectors: HashMap<String, SymbolMetricsCollector>,
-    /// Global message count
+    /// Global message count (all incoming messages)
     global_message_count: AtomicU64,
-    /// Global update count
-    global_update_count: AtomicU64,
-    /// Global trade count
-    global_trade_count: AtomicU64,
     /// Global latency samples for percentile calculations - NOW LOCK-FREE
     global_latency_buffer: LockFreeLatencyBuffer,
     /// Global latency sum
@@ -179,36 +189,19 @@ pub struct MetricsCollector {
     active_connections: AtomicU64,
     /// Start time for uptime calculation
     start_time: Instant,
-    /// System info for resource monitoring
-    system: RwLock<System>,
-    /// Process ID
-    pid: sysinfo::Pid,
     /// Last reset time for per-second calculations
-    last_reset: RwLock<Instant>,
+    last_reset: Arc<std::sync::Mutex<Instant>>,
     /// Previous counts for rate calculation
     last_message_count: AtomicU64,
-    last_update_count: AtomicU64,
-    last_trade_count: AtomicU64,
     last_bytes_received: AtomicU64,
+    /// System metrics cache (updated every 10s)
+    system_cache: SystemMetricsCache,
 }
 
 impl MetricsCollector {
     pub fn new() -> Self {
-        Self::with_symbols(TRADING_PAIRS)
-    }
-
-    pub fn with_symbols(symbols: &[&str]) -> Self {
-        let pid = sysinfo::Pid::from_u32(std::process::id());
-        let mut symbol_collectors = HashMap::new();
-        for symbol in symbols {
-            symbol_collectors.insert(symbol.to_string(), SymbolMetricsCollector::new(symbol));
-        }
-
         Self {
-            symbol_collectors,
             global_message_count: AtomicU64::new(0),
-            global_update_count: AtomicU64::new(0),
-            global_trade_count: AtomicU64::new(0),
             global_latency_buffer: LockFreeLatencyBuffer::new(),
             global_latency_sum_us: AtomicU64::new(0),
             global_latency_count: AtomicU64::new(0),
@@ -216,35 +209,17 @@ impl MetricsCollector {
             ws_reconnects: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
             start_time: Instant::now(),
-            system: RwLock::new(System::new()),
-            pid,
-            last_reset: RwLock::new(Instant::now()),
+            last_reset: Arc::new(std::sync::Mutex::new(Instant::now())),
             last_message_count: AtomicU64::new(0),
-            last_update_count: AtomicU64::new(0),
-            last_trade_count: AtomicU64::new(0),
             last_bytes_received: AtomicU64::new(0),
+            system_cache: SystemMetricsCache::new(),
         }
     }
 
-    /// Record a message received from Binance (global + per-symbol)
-    pub fn record_nb_message(&self, symbol: &str) {
+    /// Record a message received (all types)
+    #[inline]
+    pub fn record_message(&self) {
         self.global_message_count.fetch_add(1, Ordering::Relaxed);
-        if let Some(collector) = self.symbol_collectors.get(symbol) {
-            collector.record_message();
-        }
-    }
-
-    /// Record an order book update (global only)
-    pub fn record_nb_update(&self) {
-        self.global_update_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Record a trade (global + per-symbol)
-    pub fn record_trade_for_symbol(&self, symbol: &str) {
-        self.global_trade_count.fetch_add(1, Ordering::Relaxed);
-        if let Some(collector) = self.symbol_collectors.get(symbol) {
-            collector.record_trade();
-        }
     }
 
     /// Record bytes received
@@ -267,48 +242,34 @@ impl MetricsCollector {
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
-    /// Record latency from Instant for a specific symbol (micro_sec)
+    /// Record latency from Instant (micro_sec)
     #[inline]
-    pub fn record_latency(&self, symbol: &str, start: Instant) {
+    pub fn record_latency(&self, start: Instant) {
         let latency_us = start.elapsed().as_micros() as u64;
-        self.global_latency_sum_us.fetch_add(latency_us, Ordering::Relaxed);
+        self.global_latency_sum_us
+            .fetch_add(latency_us, Ordering::Relaxed);
         self.global_latency_count.fetch_add(1, Ordering::Relaxed);
         self.global_latency_buffer.record(latency_us);
-        if let Some(collector) = self.symbol_collectors.get(symbol) {
-            collector.record_latency_us(latency_us);
-        }
     }
 
     /// Compute and return current metrics
-    pub async fn compute_metrics(&self, orderbook_manager: Option<&SharedOrderBookManager>) -> Metrics {
+    pub fn compute_metrics(&self) -> Metrics {
         let now = Instant::now();
-        let mut last_reset = self.last_reset.write().await;
+        let mut last_reset = self.last_reset.lock().unwrap();
         let elapsed_secs = last_reset.elapsed().as_secs_f64();
 
         let current_messages = self.global_message_count.load(Ordering::Relaxed);
-        let current_updates = self.global_update_count.load(Ordering::Relaxed);
-        let current_trades = self.global_trade_count.load(Ordering::Relaxed);
         let current_bytes = self.bytes_received.load(Ordering::Relaxed);
 
-        let prev_messages = self.last_message_count.swap(current_messages, Ordering::Relaxed);
-        let prev_updates = self.last_update_count.swap(current_updates, Ordering::Relaxed);
-        let prev_trades = self.last_trade_count.swap(current_trades, Ordering::Relaxed);
-        let prev_bytes = self.last_bytes_received.swap(current_bytes, Ordering::Relaxed);
+        let prev_messages = self
+            .last_message_count
+            .swap(current_messages, Ordering::Relaxed);
+        let prev_bytes = self
+            .last_bytes_received
+            .swap(current_bytes, Ordering::Relaxed);
 
         let messages_per_second = if elapsed_secs > 0.0 {
             ((current_messages - prev_messages) as f64 / elapsed_secs) as u64
-        } else {
-            0
-        };
-
-        let updates_per_second = if elapsed_secs > 0.0 {
-            ((current_updates - prev_updates) as f64 / elapsed_secs) as u64
-        } else {
-            0
-        };
-
-        let trades_per_second = if elapsed_secs > 0.0 {
-            ((current_trades - prev_trades) as f64 / elapsed_secs) as u64
         } else {
             0
         };
@@ -319,7 +280,7 @@ impl MetricsCollector {
             0
         };
 
-        let (latency_avg_us, latency_min_us, latency_max_us, latency_p50_us, latency_p95_us, latency_p99_us) = {
+        let (latency_avg_us, latency_p50_us, latency_p95_us, latency_p99_us) = {
             let latency_sum = self.global_latency_sum_us.swap(0, Ordering::Relaxed);
             let latency_count = self.global_latency_count.swap(0, Ordering::Relaxed);
             let avg = if latency_count > 0 {
@@ -328,86 +289,44 @@ impl MetricsCollector {
                 0.0
             };
 
-            // Use lock-free buffer for percentiles
-            let (min, max, p50, p95, p99) = self.global_latency_buffer.get_percentiles();
-            (avg, min, max, p50, p95, p99)
+            // Use cached percentiles - O(1), no allocation
+            let (p50, p95, p99) = self.global_latency_buffer.get_cached_percentiles();
+            (avg, p50, p95, p99)
         };
 
-        let (memory_used_mb, memory_rss_mb, cpu_usage_percent) = {
-            let mut system = self.system.write().await;
-            system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[self.pid]), true);
-            system
-                .process(self.pid)
-                .map(|p| {
-                    let mem_mb = p.memory() as f64 / 1024.0 / 1024.0;
-                    let rss_mb = p.memory() as f64 / 1024.0 / 1024.0;
-                    let cpu = p.cpu_usage() as f64;
-                    (mem_mb, rss_mb, cpu)
-                })
-                .unwrap_or((0.0, 0.0, 0.0))
-        };
+        let (memory_used_mb, memory_rss_mb, cpu_usage_percent) = self.system_cache.get();
 
-        let active_symbols = self.symbol_collectors.len() as u32;
         let active_connections = self.active_connections.load(Ordering::Relaxed) as u32;
         let websocket_reconnects = self.ws_reconnects.load(Ordering::Relaxed);
-
-        let mut symbols = HashMap::new();
-        if let Some(manager) = orderbook_manager {
-            for (symbol, collector) in &self.symbol_collectors {
-                let symbol_metrics = collector.compute_metrics(elapsed_secs);
-
-                // Calculate spread_bps from order book
-                // TODO: Update to handle multi-exchange (aggregate or pick one exchange)
-                let spread_bps = if let Some(book_ref) = manager.get("Binance", symbol) {
-                    let book = book_ref.value();
-                    if let (Some(bid), Some(ask)) = (book.best_bid(), book.best_ask()) {
-                        if bid > Decimal::ZERO {
-                            let spread = ask - bid;
-                            let mid = (bid + ask) / Decimal::TWO;
-                            Some((spread / mid * Decimal::from(10000)).to_string().parse::<f64>().unwrap_or(0.0))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                
-                symbols.insert(symbol.clone(), SymbolMetrics {
-                    spread_bps,
-                    ..symbol_metrics
-                });
-            }
-        }
 
         *last_reset = now;
 
         Metrics {
             messages_per_second,
-            updates_per_second,
-            trades_per_second,
+            bytes_per_second,
             latency_avg_us,
-            latency_min_us,
-            latency_max_us,
             latency_p50_us,
             latency_p95_us,
             latency_p99_us,
             total_messages: current_messages,
-            total_updates: current_updates,
-            total_trades: current_trades,
             uptime_seconds: self.start_time.elapsed().as_secs(),
             memory_used_mb,
             memory_rss_mb,
             cpu_usage_percent,
-            active_symbols,
             active_connections,
             websocket_reconnects,
             bytes_received: current_bytes,
-            bytes_per_second,
-            symbols,
         }
+    }
+
+    /// Update system metrics (called every 10 seconds)
+    pub fn update_system_metrics(&self) {
+        self.system_cache.update();
+    }
+
+    /// Update latency percentiles (called periodically in background)
+    pub fn update_latency_percentiles(&self) {
+        self.global_latency_buffer.update_percentiles();
     }
 }
 

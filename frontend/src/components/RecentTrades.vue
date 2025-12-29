@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import type { Trade } from '../types'
-import { getExchangeColor } from '../constants'
+import type {Trade} from '../types'
+import {getExchangeColor} from '../constants'
 
 defineProps<{
   trades: Trade[]
@@ -32,23 +32,23 @@ function formatQuantity(qty: string): string {
 <template>
   <div class="trades">
     <h2>Recent Trades <span v-if="symbol" class="symbol-tag">{{ symbol }}</span></h2>
-    
+
     <div v-if="trades.length === 0" class="empty">
       Waiting for trades...
     </div>
-    
+
     <div v-else class="trade-list">
       <div
-        v-for="(trade, i) in trades"
-        :key="i"
-        class="trade"
-        :class="trade.side"
+          v-for="(trade, i) in trades"
+          :key="i"
+          class="trade"
+          :class="trade.side"
       >
         <span class="time">{{ formatTime(trade.timestamp) }}</span>
         <span
-          class="exchange-badge-small"
-          :style="{ backgroundColor: getExchangeColor(trade.exchange) }"
-          :title="trade.exchange"
+            class="exchange-badge-small"
+            :style="{ backgroundColor: getExchangeColor(trade.exchange) }"
+            :title="trade.exchange"
         >
           {{ trade.exchange.substring(0, 3) }}
         </span>
